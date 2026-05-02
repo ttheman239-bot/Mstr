@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit
 data class PricePoint(val timestampSec: Long, val value: Double)
 
 data class CompareSeries(
+    // Line-chart inputs
     val btcAtUsClose: List<PricePoint>,
     val btcAtUsOpen: List<PricePoint>,
     val btcOpenMinusClose: List<PricePoint>,
@@ -27,13 +28,19 @@ data class CompareSeries(
     val mstrOpen: List<PricePoint>,
     val mstrOpenMinusClose: List<PricePoint>,
     val ratio: List<PricePoint>,
+
+    // Raw daily MSTR OHLC (used by signal engine for ATR)
+    val mstrBars: List<MstrBar>,
+
+    // Metadata
     val latestBtcUsClose: Double,
     val latestBtcUsOpen: Double,
     val latestMstr: Double,
     val mstrSource: String,
     val periodDays: Int,
-    val analysis: Analysis,
-    val trading: TradingSystem
+
+    // Signal output
+    val signal: SignalReport
 )
 
 class PriceRepository {
@@ -91,28 +98,23 @@ class PriceRepository {
                 it.open - it.close
             )
         }
-
-        val analysis = Analyzer.analyze(
-            CompareSeries(
-                btcAtUsClose = btcAtUsClose,
-                btcAtUsOpen = btcAtUsOpen,
-                btcOpenMinusClose = btcOpenMinusClose,
-                mstrClose = mstrClose,
-                mstrOpen = mstrOpen,
-                mstrOpenMinusClose = mstrOpenMinusClose,
-                ratio = ratio,
-                latestBtcUsClose = btcAtUsClose.lastOrNull()?.value ?: 0.0,
-                latestBtcUsOpen = btcAtUsOpen.lastOrNull()?.value ?: 0.0,
-                latestMstr = mstrClose.lastOrNull()?.value ?: 0.0,
-                mstrSource = mstrSource,
-                periodDays = periodDays,
-                analysis = EmptyAnalysis,
-                trading = EmptyTradingSystem
+        val mstrBars = mstrAlignedDays.map {
+            MstrBar(
+                timestampSec = it.date.atTime(16, 0).atZone(nyZone).toEpochSecond(),
+                open = it.open,
+                high = it.high,
+                low = it.low,
+                close = it.close
             )
+        }
+
+        val signal = SignalEngine.analyze(
+            btcAtUsClose = btcAtUsClose,
+            btcAtUsOpen = btcAtUsOpen,
+            mstrBars = mstrBars,
+            ratio = ratio
         )
-        val trading = TradingSystemBuilder.build(
-            btcAtUsClose, btcAtUsOpen, mstrClose, mstrOpen, analysis
-        )
+
         CompareSeries(
             btcAtUsClose = btcAtUsClose,
             btcAtUsOpen = btcAtUsOpen,
@@ -121,13 +123,13 @@ class PriceRepository {
             mstrOpen = mstrOpen,
             mstrOpenMinusClose = mstrOpenMinusClose,
             ratio = ratio,
+            mstrBars = mstrBars,
             latestBtcUsClose = btcAtUsClose.lastOrNull()?.value ?: 0.0,
             latestBtcUsOpen = btcAtUsOpen.lastOrNull()?.value ?: 0.0,
             latestMstr = mstrClose.lastOrNull()?.value ?: 0.0,
             mstrSource = mstrSource,
             periodDays = periodDays,
-            analysis = analysis,
-            trading = trading
+            signal = signal
         )
     }
 
@@ -168,7 +170,13 @@ class PriceRepository {
             .takeLast(periodDays)
     }
 
-    private data class MstrDay(val date: LocalDate, val open: Double, val close: Double)
+    private data class MstrDay(
+        val date: LocalDate,
+        val open: Double,
+        val high: Double,
+        val low: Double,
+        val close: Double
+    )
 
     /** Returns (days, sourceName) and falls back to Yahoo if Barchart fails. */
     private fun fetchMstrSeries(days: Int): Pair<List<MstrDay>, String> {
@@ -180,7 +188,6 @@ class PriceRepository {
     }
 
     private fun fetchMstrFromBarchart(days: Int): List<MstrDay> {
-        // 1. Prime cookies by hitting the public quote page.
         val primeUrl = "https://www.barchart.com/stocks/quotes/MSTR/price-history/historical"
         val primeReq = Request.Builder()
             .url(primeUrl)
@@ -190,14 +197,12 @@ class PriceRepository {
             .build()
         client.newCall(primeReq).execute().use { it.body?.close() }
 
-        // 2. Pull XSRF-TOKEN cookie value.
         val barchartHost = HttpUrl.Builder().scheme("https").host("www.barchart.com").build()
         val cookies = cookieJar.loadForRequest(barchartHost)
         val xsrfRaw = cookies.firstOrNull { it.name == "XSRF-TOKEN" }?.value
             ?: error("No XSRF-TOKEN cookie from Barchart")
         val xsrfToken = URLDecoder.decode(xsrfRaw, "UTF-8")
 
-        // 3. Pull EOD time series. maxrecords includes weekends/holidays, so request a bit more.
         val maxRecords = (days + 30).coerceAtMost(2200)
         val apiUrl = "https://www.barchart.com/proxies/timeseries/queryeod.ashx" +
             "?symbol=MSTR&data=daily&maxrecords=$maxRecords" +
@@ -225,13 +230,15 @@ class PriceRepository {
                 val parts = line.split(",")
                 if (parts.size < 7) return@forEach
                 val open = parts[2].toDoubleOrNull() ?: return@forEach
+                val high = parts[3].toDoubleOrNull() ?: return@forEach
+                val low = parts[4].toDoubleOrNull() ?: return@forEach
                 val close = parts[5].toDoubleOrNull() ?: return@forEach
                 val date = try {
                     LocalDate.parse(parts[1], fmt)
                 } catch (e: Exception) {
                     return@forEach
                 }
-                out.add(MstrDay(date, open, close))
+                out.add(MstrDay(date, open, high, low, close))
             }
             if (out.isEmpty()) error("No usable Barchart rows")
             return out.sortedBy { it.date }.takeLast(days)
@@ -247,9 +254,11 @@ class PriceRepository {
         val out = ArrayList<MstrDay>(s.timestamp.size)
         for (i in s.timestamp.indices) {
             val o = s.open[i] ?: continue
+            val h = s.high[i] ?: continue
+            val l = s.low[i] ?: continue
             val c = s.close[i] ?: continue
             val zdt = ZonedDateTime.ofInstant(Instant.ofEpochSecond(s.timestamp[i]), nyZone)
-            out.add(MstrDay(zdt.toLocalDate(), o, c))
+            out.add(MstrDay(zdt.toLocalDate(), o, h, l, c))
         }
         return out
     }
@@ -320,7 +329,6 @@ private class SimpleCookieJar : CookieJar {
 
     @Synchronized
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
-        // Return cookies for exact host or parent domain.
         val now = System.currentTimeMillis()
         val out = ArrayList<Cookie>()
         store.forEach { (host, cookies) ->
