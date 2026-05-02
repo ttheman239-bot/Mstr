@@ -138,6 +138,13 @@ fun AppScreen(vm: MainViewModel = viewModel()) {
 
 @Composable
 private fun PeriodSelector(current: Int, onPick: (Int) -> Unit) {
+    val labels = mapOf(
+        30 to "1M",
+        90 to "3M",
+        180 to "6M",
+        365 to "1Y",
+        720 to "2Y"
+    )
     val options = listOf(30, 90, 180, 365, 720)
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -154,14 +161,7 @@ private fun PeriodSelector(current: Int, onPick: (Int) -> Unit) {
                 ),
                 modifier = Modifier.height(36.dp)
             ) {
-                Text(
-                    when {
-                        d >= 365 -> "${d / 365}Y"
-                        d >= 30 -> "${d / 30}M"
-                        else -> "${d}D"
-                    },
-                    fontSize = 12.sp
-                )
+                Text(labels[d] ?: "${d}D", fontSize = 12.sp)
             }
         }
     }
@@ -266,7 +266,7 @@ private fun ReadyView(state: UiState.Ready) {
 
         Spacer(Modifier.height(8.dp))
         Text(
-            "แหล่งข้อมูล: Barchart (^BTCUSD 60-min + MSTR 1d)",
+            "ข้อมูล: MSTR จาก Barchart (1d) • BTC จาก CoinGecko (hourly, 90d)",
             color = Muted, fontSize = 11.sp
         )
     }
@@ -462,7 +462,7 @@ private fun EmptyImbalanceNote() {
         Text("ยังไม่มีสัญญาณ", color = Color.White,
             fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         Text(
-            "Barchart ไม่ได้คืน BTC hourly bars (อาจถูก Cloudflare บล็อก) → " +
+            "ข้อมูล BTC hourly จาก CoinGecko น้อยเกินไป (rate-limit หรือ network) → " +
                 "เครื่องคำนวณ imbalance ทำงานไม่ได้",
             color = Muted, fontSize = 11.sp
         )

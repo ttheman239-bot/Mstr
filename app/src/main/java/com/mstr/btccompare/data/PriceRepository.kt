@@ -47,30 +47,29 @@ class PriceRepository {
         .build()
 
     private val barchart = BarchartClient(client, cookieJar)
+    private val coinGecko = CoinGeckoClient(client)
 
     suspend fun load(periodDays: Int = 365): CompareSeries = coroutineScope {
         val mstrJob = async(Dispatchers.IO) {
-            // request slightly more than periodDays in case of holidays/weekends
             barchart.fetchEod("MSTR", periodDays + 30)
         }
         val btcHourlyJob = async(Dispatchers.IO) {
-            // 60-minute bars give us NYSE-aligned 9:30 / 16:00 readings.
-            // Cap at 90 days hourly so the response stays small and so the
-            // imbalance regression has plenty but not too much history.
-            val daysHourly = periodDays.coerceAtMost(90)
-            // 24 hourly bars × daysHourly + buffer
-            val maxRecords = (daysHourly * 24 + 48).coerceAtMost(2400)
-            barchart.fetchIntraday("^BTCUSD", 60, maxRecords)
+            // CoinGecko: hourly granularity is reliable up to ~90 days.
+            // Always fetch hourly so the imbalance engine has NYSE-aligned points.
+            coinGecko.fetchBtcHourly(periodDays.coerceAtMost(90))
         }
         val btcDailyJob = async(Dispatchers.IO) {
-            // Daily bars used for the long-period chart line (fallback when
-            // hourly history is shorter than periodDays).
-            barchart.fetchEod("^BTCUSD", periodDays + 30)
+            // For chart ranges longer than 90 days we pad with daily bars
+            // so the visual stays full-length even though the imbalance
+            // signal is computed only over the hourly window.
+            if (periodDays > 90) {
+                runCatching { coinGecko.fetchBtcDaily(periodDays + 30) }.getOrDefault(emptyList())
+            } else emptyList()
         }
 
         val mstrDays = mstrJob.await()
         val btcHourly = btcHourlyJob.await()
-        val btcDaily = btcDailyJob.await()
+        val btcDailyExtra = btcDailyJob.await()
 
         // ── Build per-NYSE-date BTC@9:30 / @16:00 from hourly bars when we
         //    have them; for older dates fall back to daily open / close.
@@ -94,10 +93,12 @@ class PriceRepository {
                 )
             }
 
-        // (b) for any date we don't have hourly coverage, pad with daily bar
-        for (db in btcDaily) {
-            if (!btcByDate.containsKey(db.date)) {
-                btcByDate[db.date] = BtcDayPoint(atUsOpen = db.open, atUsClose = db.close)
+        // (b) for any date we don't have hourly coverage, pad with the
+        //     daily CoinGecko bar (UTC midnight close used for both points).
+        for (db in btcDailyExtra) {
+            val date = db.localDateTime.toLocalDate()
+            if (!btcByDate.containsKey(date)) {
+                btcByDate[date] = BtcDayPoint(atUsOpen = db.close, atUsClose = db.close)
             }
         }
 
