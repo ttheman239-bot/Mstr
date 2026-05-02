@@ -30,12 +30,18 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -203,6 +209,8 @@ private fun ReadyView(state: UiState.Ready) {
     val btcPct = pctChange(data.btcAtUsClose)
     val mstrPct = pctChange(data.mstrClose)
 
+    var diffMode by rememberSaveable { mutableStateOf(false) }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         SummaryRow(
             btc = data.latestBtcUsClose,
@@ -212,34 +220,50 @@ private fun ReadyView(state: UiState.Ready) {
             mstrPct = mstrPct
         )
         Spacer(Modifier.height(12.dp))
-        Legend()
+        DiffToggle(diffMode) { diffMode = it }
+        Spacer(Modifier.height(8.dp))
+        Legend(diffMode)
         Spacer(Modifier.height(8.dp))
 
+        val btcSeries = if (diffMode) {
+            listOf(
+                ChartSeries(
+                    label = "BTC open − close",
+                    color = BtcOrange,
+                    points = data.btcOpenMinusClose
+                )
+            )
+        } else {
+            listOf(
+                ChartSeries(
+                    label = "BTC open (US close)",
+                    color = BtcOrange,
+                    points = data.btcAtUsClose
+                ),
+                ChartSeries(
+                    label = "BTC close (US open)",
+                    color = BtcAmber,
+                    points = data.btcAtUsOpen,
+                    dashed = true
+                )
+            )
+        }
+
         ChartCard(
-            title = "BTC vs MSTR",
-            subtitle = "BTC open = ราคา BTC ตอน US ปิด (16:00 ET) • BTC close = ราคา BTC ตอน US เปิด (9:30 ET)",
+            title = if (diffMode) "BTC (open − close) vs MSTR" else "BTC vs MSTR",
+            subtitle = if (diffMode)
+                "BTC daily intraday change: ราคาตอน US ปิด − ราคาตอน US เปิด"
+            else
+                "BTC open = ราคา BTC ตอน US ปิด (16:00 ET) • BTC close = ราคา BTC ตอน US เปิด (9:30 ET)",
             colorAccent = BtcOrange,
             heightDp = 320
         ) {
             ZoomLineChart(
-                series = listOf(
-                    ChartSeries(
-                        label = "BTC open (US close)",
-                        color = BtcOrange,
-                        points = data.btcAtUsClose
-                    ),
-                    ChartSeries(
-                        label = "BTC close (US open)",
-                        color = BtcAmber,
-                        points = data.btcAtUsOpen,
-                        dashed = true
-                    ),
-                    ChartSeries(
-                        label = "MSTR",
-                        color = MstrBlue,
-                        points = data.mstrClose,
-                        rightAxis = true
-                    )
+                series = btcSeries + ChartSeries(
+                    label = "MSTR",
+                    color = MstrBlue,
+                    points = data.mstrClose,
+                    rightAxis = true
                 ),
                 gridColor = Grid,
                 axisColor = Muted,
@@ -376,19 +400,62 @@ private fun StatCard(
 }
 
 @Composable
-private fun Legend() {
+private fun Legend(diffMode: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Dot(BtcOrange)
         Spacer(Modifier.size(6.dp))
-        Text("BTC open", color = Color.White, fontSize = 12.sp)
-        Spacer(Modifier.size(12.dp))
-        Dot(BtcAmber)
-        Spacer(Modifier.size(6.dp))
-        Text("BTC close", color = Color.White, fontSize = 12.sp)
+        Text(
+            if (diffMode) "BTC open − close" else "BTC open",
+            color = Color.White,
+            fontSize = 12.sp
+        )
+        if (!diffMode) {
+            Spacer(Modifier.size(12.dp))
+            Dot(BtcAmber)
+            Spacer(Modifier.size(6.dp))
+            Text("BTC close", color = Color.White, fontSize = 12.sp)
+        }
         Spacer(Modifier.size(12.dp))
         Dot(MstrBlue)
         Spacer(Modifier.size(6.dp))
         Text("MSTR", color = Color.White, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun DiffToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Card)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "BTC: open − close",
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                if (checked) "แสดงเส้นเดียว: open ลบ close"
+                else "แสดง 2 เส้นแยก (open / close)",
+                color = Muted,
+                fontSize = 11.sp
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.Black,
+                checkedTrackColor = BtcOrange,
+                uncheckedThumbColor = Color.White,
+                uncheckedTrackColor = Grid
+            )
+        )
     }
 }
 

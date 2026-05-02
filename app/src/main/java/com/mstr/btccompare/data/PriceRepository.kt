@@ -17,6 +17,7 @@ data class PricePoint(val timestampSec: Long, val value: Double)
 data class CompareSeries(
     val btcAtUsClose: List<PricePoint>,
     val btcAtUsOpen: List<PricePoint>,
+    val btcOpenMinusClose: List<PricePoint>,
     val mstrClose: List<PricePoint>,
     val ratio: List<PricePoint>,
     val latestBtcUsClose: Double,
@@ -54,9 +55,17 @@ class PriceRepository {
             d.atUsClose?.let { ratio.add(PricePoint(tsClose, it / mstrClose.value)) }
         }
 
+        val btcOpenByDay = btcAtUsOpen.associateBy { dayKey(it.timestampSec) }
+        val btcOpenMinusClose = btcAtUsClose.mapNotNull { closePt ->
+            val openVal = btcOpenByDay[dayKey(closePt.timestampSec)]?.value
+                ?: return@mapNotNull null
+            PricePoint(closePt.timestampSec, closePt.value - openVal)
+        }
+
         CompareSeries(
             btcAtUsClose = btcAtUsClose,
             btcAtUsOpen = btcAtUsOpen,
+            btcOpenMinusClose = btcOpenMinusClose,
             mstrClose = mstr.filter { it.timestampSec >= (btcAtUsClose.firstOrNull()?.timestampSec ?: 0L) },
             ratio = ratio,
             latestBtcUsClose = btcAtUsClose.lastOrNull()?.value ?: 0.0,
