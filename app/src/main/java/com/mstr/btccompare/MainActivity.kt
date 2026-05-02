@@ -301,7 +301,7 @@ private fun ReadyView(state: UiState.Ready) {
 
         Spacer(Modifier.height(8.dp))
         Text(
-            "ข้อมูล: Yahoo Finance — BTC-USD 1h (NYSE-aligned), MSTR 1d",
+            "ข้อมูล: BTC จาก Yahoo Finance (1h, NYSE-aligned) • MSTR จาก ${data.mstrSource}",
             color = Muted,
             fontSize = 11.sp
         )
