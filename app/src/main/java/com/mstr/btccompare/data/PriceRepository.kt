@@ -24,6 +24,8 @@ data class CompareSeries(
     val btcAtUsOpen: List<PricePoint>,
     val btcOpenMinusClose: List<PricePoint>,
     val mstrClose: List<PricePoint>,
+    val mstrOpen: List<PricePoint>,
+    val mstrOpenMinusClose: List<PricePoint>,
     val ratio: List<PricePoint>,
     val latestBtcUsClose: Double,
     val latestBtcUsOpen: Double,
@@ -47,24 +49,22 @@ class PriceRepository {
 
     suspend fun load(periodDays: Int = 365): CompareSeries = coroutineScope {
         val btcDeferred = async(Dispatchers.IO) { fetchBtcPerDay(periodDays) }
-        val mstrDeferred = async(Dispatchers.IO) { fetchMstrCloseSeries(periodDays) }
+        val mstrDeferred = async(Dispatchers.IO) { fetchMstrSeries(periodDays) }
         val btc = btcDeferred.await()
-        val mstrPair = mstrDeferred.await()
-        val mstr = mstrPair.first
-        val mstrSource = mstrPair.second
+        val (mstrDays, mstrSource) = mstrDeferred.await()
 
-        val mstrByDay = mstr.associateBy { dayKey(it.timestampSec) }
+        val mstrByDay = mstrDays.associateBy { it.date }
 
         val btcAtUsClose = ArrayList<PricePoint>(btc.size)
         val btcAtUsOpen = ArrayList<PricePoint>(btc.size)
         val ratio = ArrayList<PricePoint>(btc.size)
         for (d in btc) {
-            val mstrClose = mstrByDay[d.date] ?: continue
+            val mstrDay = mstrByDay[d.date] ?: continue
             val tsClose = d.date.atTime(16, 0).atZone(nyZone).toEpochSecond()
             val tsOpen = d.date.atTime(9, 30).atZone(nyZone).toEpochSecond()
             d.atUsClose?.let { btcAtUsClose.add(PricePoint(tsClose, it)) }
             d.atUsOpen?.let { btcAtUsOpen.add(PricePoint(tsOpen, it)) }
-            d.atUsClose?.let { ratio.add(PricePoint(tsClose, it / mstrClose.value)) }
+            d.atUsClose?.let { ratio.add(PricePoint(tsClose, it / mstrDay.close)) }
         }
 
         val btcOpenByDay = btcAtUsOpen.associateBy { dayKey(it.timestampSec) }
@@ -74,16 +74,34 @@ class PriceRepository {
             PricePoint(closePt.timestampSec, closePt.value - openVal)
         }
 
-        val mstrAligned = mstr.filter { it.timestampSec >= (btcAtUsClose.firstOrNull()?.timestampSec ?: 0L) }
+        val firstBtcTs = btcAtUsClose.firstOrNull()?.timestampSec ?: 0L
+        val mstrAlignedDays = mstrDays.filter {
+            it.date.atTime(16, 0).atZone(nyZone).toEpochSecond() >= firstBtcTs
+        }
+        val mstrClose = mstrAlignedDays.map {
+            PricePoint(it.date.atTime(16, 0).atZone(nyZone).toEpochSecond(), it.close)
+        }
+        val mstrOpen = mstrAlignedDays.map {
+            PricePoint(it.date.atTime(9, 30).atZone(nyZone).toEpochSecond(), it.open)
+        }
+        val mstrOpenMinusClose = mstrAlignedDays.map {
+            PricePoint(
+                it.date.atTime(16, 0).atZone(nyZone).toEpochSecond(),
+                it.open - it.close
+            )
+        }
+
         val tentative = CompareSeries(
             btcAtUsClose = btcAtUsClose,
             btcAtUsOpen = btcAtUsOpen,
             btcOpenMinusClose = btcOpenMinusClose,
-            mstrClose = mstrAligned,
+            mstrClose = mstrClose,
+            mstrOpen = mstrOpen,
+            mstrOpenMinusClose = mstrOpenMinusClose,
             ratio = ratio,
             latestBtcUsClose = btcAtUsClose.lastOrNull()?.value ?: 0.0,
             latestBtcUsOpen = btcAtUsOpen.lastOrNull()?.value ?: 0.0,
-            latestMstr = mstr.lastOrNull()?.value ?: 0.0,
+            latestMstr = mstrClose.lastOrNull()?.value ?: 0.0,
             mstrSource = mstrSource,
             periodDays = periodDays,
             analysis = EmptyAnalysis
@@ -128,8 +146,10 @@ class PriceRepository {
             .takeLast(periodDays)
     }
 
-    /** Returns (series, sourceName) and falls back to Yahoo if Barchart fails. */
-    private fun fetchMstrCloseSeries(days: Int): Pair<List<PricePoint>, String> {
+    private data class MstrDay(val date: LocalDate, val open: Double, val close: Double)
+
+    /** Returns (days, sourceName) and falls back to Yahoo if Barchart fails. */
+    private fun fetchMstrSeries(days: Int): Pair<List<MstrDay>, String> {
         return try {
             fetchMstrFromBarchart(days) to "Barchart"
         } catch (t: Throwable) {
@@ -137,7 +157,7 @@ class PriceRepository {
         }
     }
 
-    private fun fetchMstrFromBarchart(days: Int): List<PricePoint> {
+    private fun fetchMstrFromBarchart(days: Int): List<MstrDay> {
         // 1. Prime cookies by hitting the public quote page.
         val primeUrl = "https://www.barchart.com/stocks/quotes/MSTR/price-history/historical"
         val primeReq = Request.Builder()
@@ -176,38 +196,38 @@ class PriceRepository {
             if (body.isEmpty()) error("Empty Barchart body")
             // Format per row: SYMBOL,YYYYMMDD,open,high,low,close,volume
             val fmt = DateTimeFormatter.ofPattern("yyyyMMdd")
-            val out = ArrayList<PricePoint>()
+            val out = ArrayList<MstrDay>()
             body.lineSequence().forEach { rawLine ->
                 val line = rawLine.trim()
                 if (line.isEmpty()) return@forEach
                 val parts = line.split(",")
                 if (parts.size < 7) return@forEach
+                val open = parts[2].toDoubleOrNull() ?: return@forEach
                 val close = parts[5].toDoubleOrNull() ?: return@forEach
                 val date = try {
                     LocalDate.parse(parts[1], fmt)
                 } catch (e: Exception) {
                     return@forEach
                 }
-                val ts = date.atTime(16, 0).atZone(nyZone).toEpochSecond()
-                out.add(PricePoint(ts, close))
+                out.add(MstrDay(date, open, close))
             }
             if (out.isEmpty()) error("No usable Barchart rows")
-            return out.sortedBy { it.timestampSec }.takeLast(days)
+            return out.sortedBy { it.date }.takeLast(days)
         }
     }
 
-    private fun fetchMstrFromYahoo(days: Int): List<PricePoint> {
+    private fun fetchMstrFromYahoo(days: Int): List<MstrDay> {
         val end = System.currentTimeMillis() / 1000L
         val start = end - days.toLong() * 24L * 3600L - 7L * 24L * 3600L
         val url = "https://query1.finance.yahoo.com/v8/finance/chart/MSTR" +
             "?period1=$start&period2=$end&interval=1d&events=history"
         val s = fetchYahooSeries(url)
-        val out = ArrayList<PricePoint>(s.timestamp.size)
+        val out = ArrayList<MstrDay>(s.timestamp.size)
         for (i in s.timestamp.indices) {
+            val o = s.open[i] ?: continue
             val c = s.close[i] ?: continue
             val zdt = ZonedDateTime.ofInstant(Instant.ofEpochSecond(s.timestamp[i]), nyZone)
-            val ts = zdt.toLocalDate().atTime(16, 0).atZone(nyZone).toEpochSecond()
-            out.add(PricePoint(ts, c))
+            out.add(MstrDay(zdt.toLocalDate(), o, c))
         }
         return out
     }

@@ -253,21 +253,31 @@ private fun ReadyView(state: UiState.Ready) {
             )
         }
 
-        val combinedSeries = btcSeries + ChartSeries(
-            label = "MSTR",
-            color = MstrBlue,
-            points = data.mstrClose,
-            rightAxis = true
-        )
-        val mstrSeriesIndex = combinedSeries.indexOfFirst { it.label == "MSTR" }
-        val markers = data.analysis.mstrMarkers.map {
+        val mstrSeries = if (diffMode) {
+            ChartSeries(
+                label = "MSTR open − close",
+                color = MstrBlue,
+                points = data.mstrOpenMinusClose,
+                rightAxis = true
+            )
+        } else {
+            ChartSeries(
+                label = "MSTR",
+                color = MstrBlue,
+                points = data.mstrClose,
+                rightAxis = true
+            )
+        }
+        val combinedSeries = btcSeries + mstrSeries
+        val mstrSeriesIndex = combinedSeries.indexOf(mstrSeries)
+        val markers = if (diffMode) emptyList() else data.analysis.mstrMarkers.map {
             ChartMarker(it.timestampSec, it.price, it.isBuy)
         }
 
         ChartCard(
-            title = if (diffMode) "BTC (open − close) vs MSTR" else "BTC vs MSTR",
+            title = if (diffMode) "BTC (open − close) vs MSTR (open − close)" else "BTC vs MSTR",
             subtitle = if (diffMode)
-                "BTC daily intraday change: ราคาตอน US ปิด − ราคาตอน US เปิด"
+                "Daily intraday change: BTC = US-close − US-open • MSTR = open − close"
             else
                 "BTC open = ราคา BTC ตอน US ปิด (16:00 ET) • BTC close = ราคา BTC ตอน US เปิด (9:30 ET)",
             colorAccent = BtcOrange,
@@ -420,7 +430,7 @@ private fun Legend(diffMode: Boolean) {
         Dot(BtcOrange)
         Spacer(Modifier.size(6.dp))
         Text(
-            if (diffMode) "BTC open − close" else "BTC open",
+            if (diffMode) "BTC US-close − US-open" else "BTC open",
             color = Color.White,
             fontSize = 12.sp
         )
@@ -433,7 +443,11 @@ private fun Legend(diffMode: Boolean) {
         Spacer(Modifier.size(12.dp))
         Dot(MstrBlue)
         Spacer(Modifier.size(6.dp))
-        Text("MSTR", color = Color.White, fontSize = 12.sp)
+        Text(
+            if (diffMode) "MSTR open − close" else "MSTR",
+            color = Color.White,
+            fontSize = 12.sp
+        )
     }
 }
 
@@ -449,14 +463,16 @@ private fun DiffToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                "BTC: open − close",
+                "Mode: open − close",
                 color = Color.White,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                if (checked) "แสดงเส้นเดียว: open ลบ close"
-                else "แสดง 2 เส้นแยก (open / close)",
+                if (checked)
+                    "เส้นเดียว: BTC = US-close − US-open • MSTR = open − close"
+                else
+                    "แสดง 2 เส้น BTC + MSTR ปกติ",
                 color = Muted,
                 fontSize = 11.sp
             )
