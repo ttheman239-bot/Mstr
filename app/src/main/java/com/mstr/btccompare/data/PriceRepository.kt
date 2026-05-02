@@ -29,7 +29,8 @@ data class CompareSeries(
     val latestBtcUsOpen: Double,
     val latestMstr: Double,
     val mstrSource: String,
-    val periodDays: Int
+    val periodDays: Int,
+    val analysis: Analysis
 )
 
 class PriceRepository {
@@ -73,18 +74,21 @@ class PriceRepository {
             PricePoint(closePt.timestampSec, closePt.value - openVal)
         }
 
-        CompareSeries(
+        val mstrAligned = mstr.filter { it.timestampSec >= (btcAtUsClose.firstOrNull()?.timestampSec ?: 0L) }
+        val tentative = CompareSeries(
             btcAtUsClose = btcAtUsClose,
             btcAtUsOpen = btcAtUsOpen,
             btcOpenMinusClose = btcOpenMinusClose,
-            mstrClose = mstr.filter { it.timestampSec >= (btcAtUsClose.firstOrNull()?.timestampSec ?: 0L) },
+            mstrClose = mstrAligned,
             ratio = ratio,
             latestBtcUsClose = btcAtUsClose.lastOrNull()?.value ?: 0.0,
             latestBtcUsOpen = btcAtUsOpen.lastOrNull()?.value ?: 0.0,
             latestMstr = mstr.lastOrNull()?.value ?: 0.0,
             mstrSource = mstrSource,
-            periodDays = periodDays
+            periodDays = periodDays,
+            analysis = EmptyAnalysis
         )
+        tentative.copy(analysis = Analyzer.analyze(tentative))
     }
 
     private fun dayKey(epochSec: Long): LocalDate =

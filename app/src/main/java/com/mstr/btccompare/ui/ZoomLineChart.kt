@@ -39,6 +39,12 @@ data class ChartSeries(
     val fill: Boolean = false
 )
 
+data class ChartMarker(
+    val timestampSec: Long,
+    val value: Double,
+    val isBuy: Boolean
+)
+
 @Composable
 fun ZoomLineChart(
     series: List<ChartSeries>,
@@ -46,6 +52,8 @@ fun ZoomLineChart(
     axisColor: Color,
     tooltipBg: Color,
     tooltipText: Color,
+    markers: List<ChartMarker> = emptyList(),
+    markerSeriesIndex: Int = 0,
     valueFormatter: (Double) -> String = ::formatPriceValue,
     modifier: Modifier = Modifier
 ) {
@@ -184,6 +192,44 @@ fun ZoomLineChart(
                     Stroke(width = 3f)
                 }
                 drawPath(path = path, color = s.color, style = stroke)
+            }
+
+            // Buy/sell markers drawn relative to the chosen series' min/max
+            val markerHost = series.getOrNull(markerSeriesIndex)
+            if (markers.isNotEmpty() && markerHost != null && markerHost.points.size >= 2) {
+                val mn = markerHost.points.minOf { it.value }
+                val mx = markerHost.points.maxOf { it.value }
+                val span = (mx - mn).takeIf { it > 0.0 } ?: 1.0
+                markers.forEach { m ->
+                    val x = tsToScreen(m.timestampSec)
+                    if (x !in (padL - 8f)..(padL + plotW + 8f)) return@forEach
+                    val y = padT + plotH * (1f - ((m.value - mn) / span).toFloat())
+                    val triPath = Path()
+                    val sz = 7f
+                    val gap = 6f
+                    val color = if (m.isBuy) Color(0xFF22C55E) else Color(0xFFEF4444)
+                    if (m.isBuy) {
+                        // Up triangle below the price
+                        val baseY = (y + gap + sz * 1.6f).coerceAtMost(padT + plotH - 2f)
+                        triPath.moveTo(x, baseY - sz * 1.6f)
+                        triPath.lineTo(x - sz, baseY)
+                        triPath.lineTo(x + sz, baseY)
+                        triPath.close()
+                    } else {
+                        // Down triangle above the price
+                        val baseY = (y - gap - sz * 1.6f).coerceAtLeast(padT + 2f)
+                        triPath.moveTo(x, baseY + sz * 1.6f)
+                        triPath.lineTo(x - sz, baseY)
+                        triPath.lineTo(x + sz, baseY)
+                        triPath.close()
+                    }
+                    drawPath(triPath, color = color)
+                    drawPath(
+                        triPath,
+                        color = Color.White.copy(alpha = 0.9f),
+                        style = Stroke(width = 1.2f)
+                    )
+                }
             }
 
             // Y-axis labels: leftmost series → left, first rightAxis series → right

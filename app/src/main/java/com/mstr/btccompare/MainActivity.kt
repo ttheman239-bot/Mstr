@@ -51,7 +51,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.mstr.btccompare.data.Analysis
 import com.mstr.btccompare.data.PricePoint
+import com.mstr.btccompare.data.TickerSignal
+import com.mstr.btccompare.data.Verdict
+import com.mstr.btccompare.ui.ChartMarker
 import com.mstr.btccompare.ui.ChartSeries
 import com.mstr.btccompare.ui.MainViewModel
 import com.mstr.btccompare.ui.UiState
@@ -249,6 +253,17 @@ private fun ReadyView(state: UiState.Ready) {
             )
         }
 
+        val combinedSeries = btcSeries + ChartSeries(
+            label = "MSTR",
+            color = MstrBlue,
+            points = data.mstrClose,
+            rightAxis = true
+        )
+        val mstrSeriesIndex = combinedSeries.indexOfFirst { it.label == "MSTR" }
+        val markers = data.analysis.mstrMarkers.map {
+            ChartMarker(it.timestampSec, it.price, it.isBuy)
+        }
+
         ChartCard(
             title = if (diffMode) "BTC (open − close) vs MSTR" else "BTC vs MSTR",
             subtitle = if (diffMode)
@@ -259,12 +274,9 @@ private fun ReadyView(state: UiState.Ready) {
             heightDp = 320
         ) {
             ZoomLineChart(
-                series = btcSeries + ChartSeries(
-                    label = "MSTR",
-                    color = MstrBlue,
-                    points = data.mstrClose,
-                    rightAxis = true
-                ),
+                series = combinedSeries,
+                markers = markers,
+                markerSeriesIndex = mstrSeriesIndex.coerceAtLeast(0),
                 gridColor = Grid,
                 axisColor = Muted,
                 tooltipBg = TooltipBg,
@@ -272,6 +284,9 @@ private fun ReadyView(state: UiState.Ready) {
                 modifier = Modifier.fillMaxSize()
             )
         }
+
+        Spacer(Modifier.height(12.dp))
+        AnalysisCard(data.analysis)
 
         Spacer(Modifier.height(12.dp))
 
@@ -467,6 +482,169 @@ private fun Dot(color: Color) {
             .clip(CircleShape)
             .background(color)
     )
+}
+
+@Composable
+private fun AnalysisCard(a: Analysis) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Card)
+            .padding(14.dp)
+    ) {
+        Text("การวิเคราะห์ — จุดเข้า / ออก", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "อิง RSI(14), SMA20/50 และ Z-score(60) ของ BTC/MSTR ratio",
+            color = Muted,
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(10.dp))
+
+        VerdictBanner(score = a.combinedScore, recommendation = a.recommendation)
+
+        Spacer(Modifier.height(10.dp))
+        SignalBlock(
+            title = "MSTR signal",
+            accent = MstrBlue,
+            sig = a.mstr
+        )
+        Spacer(Modifier.height(10.dp))
+        SignalBlock(
+            title = "BTC signal",
+            accent = BtcOrange,
+            sig = a.btc
+        )
+        Spacer(Modifier.height(10.dp))
+        RatioBlock(a)
+    }
+}
+
+@Composable
+private fun VerdictBanner(score: Int, recommendation: String) {
+    val v = Verdict.fromScore(score)
+    val (bg, fg) = when {
+        v.isBuy && score >= 3 -> UpGreen to Color.Black
+        v.isBuy -> UpGreen.copy(alpha = 0.85f) to Color.Black
+        v.isSell && score <= -3 -> DownRed to Color.White
+        v.isSell -> DownRed.copy(alpha = 0.85f) to Color.White
+        else -> Grid to Color.White
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(bg)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(v.label, color = fg, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(recommendation, color = fg.copy(alpha = 0.85f), fontSize = 12.sp)
+        }
+        Text(
+            "score %+d".format(score),
+            color = fg,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 13.sp
+        )
+    }
+}
+
+@Composable
+private fun SignalBlock(title: String, accent: Color, sig: TickerSignal) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = accent, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Spacer(Modifier.size(8.dp))
+            VerdictPill(sig.verdict, sig.score)
+            Spacer(Modifier.weight(1f))
+            Text(
+                if (sig.price > 0) "$%,.2f".format(sig.price) else "—",
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Row {
+            MetricChip(
+                "RSI",
+                sig.rsi?.let { "%.0f".format(it) } ?: "—"
+            )
+            Spacer(Modifier.size(6.dp))
+            MetricChip(
+                "SMA20",
+                sig.sma20?.let { "$%,.0f".format(it) } ?: "—"
+            )
+            Spacer(Modifier.size(6.dp))
+            MetricChip(
+                "SMA50",
+                sig.sma50?.let { "$%,.0f".format(it) } ?: "—"
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        sig.reasons.forEach { r ->
+            Text("• $r", color = Muted, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun RatioBlock(a: Analysis) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Ratio (BTC/MSTR)",
+                color = UpGreen,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp
+            )
+            Spacer(Modifier.size(8.dp))
+            VerdictPill(a.ratio.verdict, scoreOverride = null)
+            Spacer(Modifier.weight(1f))
+            Text(
+                a.ratio.z?.let { "Z=%.2f".format(it) } ?: "—",
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text("• ${a.ratio.reason}", color = Muted, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun VerdictPill(v: Verdict, scoreOverride: Int? = null) {
+    val color = when {
+        v.isBuy -> UpGreen
+        v.isSell -> DownRed
+        else -> Muted
+    }
+    val text = if (scoreOverride != null) "${v.label} %+d".format(scoreOverride) else v.label
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(color.copy(alpha = 0.25f))
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+    ) {
+        Text(text, color = color, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun MetricChip(label: String, value: String) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Bg)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Text(label, color = Muted, fontSize = 10.sp)
+        Text(value, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    }
 }
 
 private fun pctChange(points: List<PricePoint>): Double {
