@@ -32,7 +32,8 @@ data class CompareSeries(
     val latestMstr: Double,
     val mstrSource: String,
     val periodDays: Int,
-    val analysis: Analysis
+    val analysis: Analysis,
+    val trading: TradingSystem
 )
 
 class PriceRepository {
@@ -91,7 +92,28 @@ class PriceRepository {
             )
         }
 
-        val tentative = CompareSeries(
+        val analysis = Analyzer.analyze(
+            CompareSeries(
+                btcAtUsClose = btcAtUsClose,
+                btcAtUsOpen = btcAtUsOpen,
+                btcOpenMinusClose = btcOpenMinusClose,
+                mstrClose = mstrClose,
+                mstrOpen = mstrOpen,
+                mstrOpenMinusClose = mstrOpenMinusClose,
+                ratio = ratio,
+                latestBtcUsClose = btcAtUsClose.lastOrNull()?.value ?: 0.0,
+                latestBtcUsOpen = btcAtUsOpen.lastOrNull()?.value ?: 0.0,
+                latestMstr = mstrClose.lastOrNull()?.value ?: 0.0,
+                mstrSource = mstrSource,
+                periodDays = periodDays,
+                analysis = EmptyAnalysis,
+                trading = EmptyTradingSystem
+            )
+        )
+        val trading = TradingSystemBuilder.build(
+            btcAtUsClose, btcAtUsOpen, mstrClose, mstrOpen, analysis
+        )
+        CompareSeries(
             btcAtUsClose = btcAtUsClose,
             btcAtUsOpen = btcAtUsOpen,
             btcOpenMinusClose = btcOpenMinusClose,
@@ -104,9 +126,9 @@ class PriceRepository {
             latestMstr = mstrClose.lastOrNull()?.value ?: 0.0,
             mstrSource = mstrSource,
             periodDays = periodDays,
-            analysis = EmptyAnalysis
+            analysis = analysis,
+            trading = trading
         )
-        tentative.copy(analysis = Analyzer.analyze(tentative))
     }
 
     private fun dayKey(epochSec: Long): LocalDate =

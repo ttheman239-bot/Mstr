@@ -52,8 +52,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mstr.btccompare.data.Analysis
+import com.mstr.btccompare.data.LeadLagStats
+import com.mstr.btccompare.data.MNavStats
+import com.mstr.btccompare.data.MstrFundamentals
 import com.mstr.btccompare.data.PricePoint
+import com.mstr.btccompare.data.RiskParams
 import com.mstr.btccompare.data.TickerSignal
+import com.mstr.btccompare.data.TradePlan
+import com.mstr.btccompare.data.TradingSystem
 import com.mstr.btccompare.data.Verdict
 import com.mstr.btccompare.ui.ChartMarker
 import com.mstr.btccompare.ui.ChartSeries
@@ -297,6 +303,9 @@ private fun ReadyView(state: UiState.Ready) {
 
         Spacer(Modifier.height(12.dp))
         AnalysisCard(data.analysis)
+
+        Spacer(Modifier.height(12.dp))
+        TradingSystemSection(data.trading)
 
         Spacer(Modifier.height(12.dp))
 
@@ -660,6 +669,245 @@ private fun MetricChip(label: String, value: String) {
     ) {
         Text(label, color = Muted, fontSize = 10.sp)
         Text(value, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun TradingSystemSection(t: TradingSystem) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Card)
+            .padding(14.dp)
+    ) {
+        Text(
+            "Trading System (Day-trade)",
+            color = Color.White,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 14.sp
+        )
+        Text(
+            "mNAV mean-reversion + BTC lead-lag + ATR risk",
+            color = Muted,
+            fontSize = 11.sp
+        )
+
+        Spacer(Modifier.height(10.dp))
+        TradePlanBanner(t.plan)
+
+        Spacer(Modifier.height(12.dp))
+        MNavBlock(stats = t.mnav.stats, series = t.mnav.series)
+
+        Spacer(Modifier.height(12.dp))
+        LeadLagBlock(t.leadLag)
+
+        Spacer(Modifier.height(12.dp))
+        RiskBlock(t.risk)
+
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Constants: BTC holdings ≈ ${"%,d".format(MstrFundamentals.btcHoldings)} • " +
+                "MSTR shares ≈ ${"%,d".format(MstrFundamentals.sharesOutstanding)}. " +
+                "Update ทุกไตรมาส.",
+            color = Muted,
+            fontSize = 10.sp
+        )
+    }
+}
+
+@Composable
+private fun TradePlanBanner(p: TradePlan) {
+    val (bg, fg) = when {
+        p.verdict.isBuy -> UpGreen.copy(alpha = 0.85f) to Color.Black
+        p.verdict.isSell -> DownRed.copy(alpha = 0.85f) to Color.White
+        else -> Grid to Color.White
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(bg)
+            .padding(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(p.direction, color = fg, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Spacer(Modifier.weight(1f))
+            Text(p.verdict.label, color = fg, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+        }
+        if (p.stopPrice > 0.0 || p.target1Price > 0.0) {
+            Spacer(Modifier.height(6.dp))
+            Row {
+                LevelChip("Entry", p.entryPrice, fg)
+                Spacer(Modifier.size(6.dp))
+                LevelChip("Stop", p.stopPrice, fg)
+                Spacer(Modifier.size(6.dp))
+                LevelChip("T1 (1R)", p.target1Price, fg)
+                Spacer(Modifier.size(6.dp))
+                LevelChip("T2 (2R)", p.target2Price, fg)
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(p.rationale, color = fg.copy(alpha = 0.85f), fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun LevelChip(label: String, price: Double, fg: Color) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.Black.copy(alpha = 0.25f))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Text(label, color = fg.copy(alpha = 0.85f), fontSize = 10.sp)
+        Text(
+            if (price > 0.0) "$%.2f".format(price) else "—",
+            color = fg, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
+private fun MNavBlock(stats: MNavStats, series: List<PricePoint>) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("mNAV (premium ratio)", color = UpGreen, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Spacer(Modifier.size(8.dp))
+            VerdictPill(stats.verdict, scoreOverride = null)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "%.2f".format(stats.current),
+                color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Row {
+            MetricChip("mean", "%.2f".format(stats.mean))
+            Spacer(Modifier.size(6.dp))
+            MetricChip("σ", "%.2f".format(stats.stdev))
+            Spacer(Modifier.size(6.dp))
+            MetricChip("Z", "%+.2f".format(stats.zScore))
+            Spacer(Modifier.size(6.dp))
+            MetricChip("RSI", stats.rsi?.let { "%.0f".format(it) } ?: "—")
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Long-zone ≤ %.2f • Short-zone ≥ %.2f".format(stats.entryLong, stats.entryShort),
+            color = Muted, fontSize = 11.sp
+        )
+        Text("• ${stats.message}", color = Muted, fontSize = 11.sp)
+
+        if (series.size >= 2) {
+            Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(160.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Bg)
+                    .padding(6.dp)
+            ) {
+                ZoomLineChart(
+                    series = listOf(
+                        ChartSeries(
+                            label = "mNAV",
+                            color = UpGreen,
+                            points = series,
+                            fill = true
+                        )
+                    ),
+                    gridColor = Grid,
+                    axisColor = Muted,
+                    tooltipBg = TooltipBg,
+                    tooltipText = Color.White,
+                    valueFormatter = { v -> "%.2f".format(v) },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LeadLagBlock(s: LeadLagStats) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Lead-Lag (BTC overnight → MSTR gap)",
+                color = BtcOrange,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                "n=${s.sampleSize}",
+                color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Row {
+            MetricChip("ρ", "%.2f".format(s.correlation))
+            Spacer(Modifier.size(6.dp))
+            MetricChip("β", "%.2f".format(s.regressionSlope))
+            Spacer(Modifier.size(6.dp))
+            MetricChip("Fade-rate", "%.0f%%".format(s.gapFadeRate * 100))
+        }
+        Spacer(Modifier.height(4.dp))
+        if (s.todaysBtcOvernight != null) {
+            Row {
+                MetricChip("BTC overnight", "%+.2f%%".format(s.todaysBtcOvernight * 100))
+                Spacer(Modifier.size(6.dp))
+                MetricChip(
+                    "MSTR gap คาด",
+                    s.expectedMstrGap?.let { "%+.2f%%".format(it * 100) } ?: "—"
+                )
+                Spacer(Modifier.size(6.dp))
+                MetricChip(
+                    "จริง",
+                    s.todaysMstrGap?.let { "%+.2f%%".format(it * 100) } ?: "—"
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+        Text("• ${s.message}", color = Muted, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun RiskBlock(r: RiskParams) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Risk / Position size",
+                color = MstrBlue,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                "Account $%,.0f".format(r.accountSize),
+                color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Row {
+            MetricChip("ATR(14)", if (r.atr > 0.0) "$%.2f".format(r.atr) else "—")
+            Spacer(Modifier.size(6.dp))
+            MetricChip("Stop (1.5×ATR)", if (r.stopDistance > 0.0) "$%.2f".format(r.stopDistance) else "—")
+            Spacer(Modifier.size(6.dp))
+            MetricChip("2% risk", "$%,.0f".format(r.maxRiskPerTrade))
+        }
+        Spacer(Modifier.height(4.dp))
+        Row {
+            MetricChip("Shares", "${r.suggestedShares}")
+            Spacer(Modifier.size(6.dp))
+            MetricChip("Notional", "$%,.0f".format(r.notionalAtSize))
+            Spacer(Modifier.size(6.dp))
+            MetricChip("Daily limit", "$%,.0f".format(r.dailyLossLimit))
+        }
+        Spacer(Modifier.height(4.dp))
+        Text("• ${r.message}", color = Muted, fontSize = 11.sp)
     }
 }
 
