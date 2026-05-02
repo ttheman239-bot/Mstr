@@ -6,6 +6,7 @@ import kotlinx.coroutines.coroutineScope
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -13,21 +14,13 @@ import java.util.concurrent.TimeUnit
 
 data class PricePoint(val timestampSec: Long, val value: Double)
 
-data class CandlePoint(
-    val timestampSec: Long,
-    val open: Double,
-    val high: Double,
-    val low: Double,
-    val close: Double
-) {
-    val isUp: Boolean get() = close >= open
-}
-
 data class CompareSeries(
-    val btc: List<CandlePoint>,
-    val mstr: List<CandlePoint>,
+    val btcAtUsClose: List<PricePoint>,
+    val btcAtUsOpen: List<PricePoint>,
+    val mstrClose: List<PricePoint>,
     val ratio: List<PricePoint>,
-    val latestBtc: Double,
+    val latestBtcUsClose: Double,
+    val latestBtcUsOpen: Double,
     val latestMstr: Double,
     val periodDays: Int
 )
@@ -42,105 +35,89 @@ class PriceRepository {
         .build()
 
     suspend fun load(periodDays: Int = 365): CompareSeries = coroutineScope {
-        val btcDeferred = async(Dispatchers.IO) { fetchBtcAlignedCandles(periodDays) }
-        val mstrDeferred = async(Dispatchers.IO) { fetchMstrCandles(periodDays) }
+        val btcDeferred = async(Dispatchers.IO) { fetchBtcPerDay(periodDays) }
+        val mstrDeferred = async(Dispatchers.IO) { fetchMstrCloseSeries(periodDays) }
         val btc = btcDeferred.await()
         val mstr = mstrDeferred.await()
 
         val mstrByDay = mstr.associateBy { dayKey(it.timestampSec) }
-        val aligned = btc.mapNotNull { b -> mstrByDay[dayKey(b.timestampSec)]?.let { b to it } }
-        val ratio = aligned.map { (b, m) ->
-            PricePoint(b.timestampSec, b.close / m.close)
+
+        val btcAtUsClose = ArrayList<PricePoint>(btc.size)
+        val btcAtUsOpen = ArrayList<PricePoint>(btc.size)
+        val ratio = ArrayList<PricePoint>(btc.size)
+        for (d in btc) {
+            val mstrClose = mstrByDay[d.date] ?: continue
+            val tsClose = d.date.atTime(16, 0).atZone(nyZone).toEpochSecond()
+            val tsOpen = d.date.atTime(9, 30).atZone(nyZone).toEpochSecond()
+            d.atUsClose?.let { btcAtUsClose.add(PricePoint(tsClose, it)) }
+            d.atUsOpen?.let { btcAtUsOpen.add(PricePoint(tsOpen, it)) }
+            d.atUsClose?.let { ratio.add(PricePoint(tsClose, it / mstrClose.value)) }
         }
-        val alignedBtc = aligned.map { it.first }
-        val alignedMstr = aligned.map { it.second }
 
         CompareSeries(
-            btc = alignedBtc,
-            mstr = alignedMstr,
+            btcAtUsClose = btcAtUsClose,
+            btcAtUsOpen = btcAtUsOpen,
+            mstrClose = mstr.filter { it.timestampSec >= (btcAtUsClose.firstOrNull()?.timestampSec ?: 0L) },
             ratio = ratio,
-            latestBtc = alignedBtc.lastOrNull()?.close ?: 0.0,
-            latestMstr = alignedMstr.lastOrNull()?.close ?: 0.0,
+            latestBtcUsClose = btcAtUsClose.lastOrNull()?.value ?: 0.0,
+            latestBtcUsOpen = btcAtUsOpen.lastOrNull()?.value ?: 0.0,
+            latestMstr = mstr.lastOrNull()?.value ?: 0.0,
             periodDays = periodDays
         )
     }
 
     private fun dayKey(epochSec: Long): LocalDate =
-        ZonedDateTime.ofInstant(java.time.Instant.ofEpochSecond(epochSec), nyZone).toLocalDate()
+        ZonedDateTime.ofInstant(Instant.ofEpochSecond(epochSec), nyZone).toLocalDate()
 
-    private fun fetchBtcAlignedCandles(periodDays: Int): List<CandlePoint> {
-        // Yahoo limits 1h interval to ~730 days. Cap and pad start a bit.
+    private data class BtcDayValues(
+        val date: LocalDate,
+        val atUsOpen: Double?,
+        val atUsClose: Double?
+    )
+
+    private fun fetchBtcPerDay(periodDays: Int): List<BtcDayValues> {
+        // Yahoo limits 1h interval to ~730 days.
         val effDays = periodDays.coerceAtMost(720)
         val end = System.currentTimeMillis() / 1000L
         val start = end - effDays.toLong() * 24L * 3600L - 7L * 24L * 3600L
         val url = "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD" +
             "?period1=$start&period2=$end&interval=1h&events=history"
-        val (timestamps, opens, highs, lows, closes) = fetchYahooSeries(url)
+        val s = fetchYahooSeries(url)
 
-        // Group hourly bars by NY trading date and pick:
-        //  - the bar whose ET hour == 9  -> open at US market open (9:30 ET)
-        //  - the bar whose ET hour == 15 -> session close hour ending 16:00 ET
-        // Track session high/low across 9-15 ET inclusive.
-        data class Acc(
-            var openVal: Double? = null,
-            var closeVal: Double? = null,
-            var high: Double = Double.NEGATIVE_INFINITY,
-            var low: Double = Double.POSITIVE_INFINITY,
-            var closeTs: Long = 0L
-        )
+        data class Acc(var open: Double? = null, var close: Double? = null)
         val byDay = LinkedHashMap<LocalDate, Acc>()
-        for (i in timestamps.indices) {
-            val ts = timestamps[i]
-            val o = opens[i]; val h = highs[i]; val l = lows[i]; val c = closes[i]
-            if (o == null || h == null || l == null || c == null) continue
-            val zdt = ZonedDateTime.ofInstant(java.time.Instant.ofEpochSecond(ts), nyZone)
-            val date = zdt.toLocalDate()
-            val hour = zdt.hour
-            if (hour !in 9..15) continue
-            // Skip weekends (NYSE closed)
+        for (i in s.timestamp.indices) {
+            val o = s.open[i] ?: continue
+            val c = s.close[i] ?: continue
+            val zdt = ZonedDateTime.ofInstant(Instant.ofEpochSecond(s.timestamp[i]), nyZone)
             val dow = zdt.dayOfWeek.value
             if (dow == 6 || dow == 7) continue
+            val date = zdt.toLocalDate()
+            val hour = zdt.hour
             val acc = byDay.getOrPut(date) { Acc() }
-            if (h > acc.high) acc.high = h
-            if (l < acc.low) acc.low = l
-            if (hour == 9 && acc.openVal == null) acc.openVal = o
-            if (hour == 15) {
-                acc.closeVal = c
-                acc.closeTs = ts
-            }
+            // Hour 9 bar covers 09:00-10:00 ET, includes the 9:30 NYSE open
+            if (hour == 9 && acc.open == null) acc.open = o
+            // Hour 15 bar covers 15:00-16:00 ET, ends at the 16:00 NYSE close
+            if (hour == 15) acc.close = c
         }
-        return byDay.entries.mapNotNull { (date, a) ->
-            val openV = a.openVal ?: return@mapNotNull null
-            val closeV = a.closeVal ?: return@mapNotNull null
-            // Use the day's NY-midday timestamp as the canonical x value.
-            val ts = date.atTime(12, 0).atZone(nyZone).toEpochSecond()
-            CandlePoint(
-                timestampSec = ts,
-                open = openV,
-                high = if (a.high.isInfinite()) openV else a.high,
-                low = if (a.low.isInfinite()) openV else a.low,
-                close = closeV
-            )
-        }.sortedBy { it.timestampSec }
+        return byDay.entries
+            .map { (date, a) -> BtcDayValues(date, atUsOpen = a.open, atUsClose = a.close) }
+            .sortedBy { it.date }
             .takeLast(periodDays)
     }
 
-    private fun fetchMstrCandles(days: Int): List<CandlePoint> {
+    private fun fetchMstrCloseSeries(days: Int): List<PricePoint> {
         val end = System.currentTimeMillis() / 1000L
         val start = end - days.toLong() * 24L * 3600L - 7L * 24L * 3600L
         val url = "https://query1.finance.yahoo.com/v8/finance/chart/MSTR" +
             "?period1=$start&period2=$end&interval=1d&events=history"
-        val (timestamps, opens, highs, lows, closes) = fetchYahooSeries(url)
-        val out = ArrayList<CandlePoint>(timestamps.size)
-        for (i in timestamps.indices) {
-            val o = opens[i] ?: continue
-            val h = highs[i] ?: continue
-            val l = lows[i] ?: continue
-            val c = closes[i] ?: continue
-            // Normalize timestamp to NY 12:00 of the trading day for clean alignment
-            val zdt = ZonedDateTime.ofInstant(java.time.Instant.ofEpochSecond(timestamps[i]), nyZone)
-            val ts = zdt.toLocalDate().atTime(12, 0).atZone(nyZone).toEpochSecond()
-            out.add(CandlePoint(ts, o, h, l, c))
+        val s = fetchYahooSeries(url)
+        val out = ArrayList<PricePoint>(s.timestamp.size)
+        for (i in s.timestamp.indices) {
+            val c = s.close[i] ?: continue
+            val zdt = ZonedDateTime.ofInstant(Instant.ofEpochSecond(s.timestamp[i]), nyZone)
+            val ts = zdt.toLocalDate().atTime(16, 0).atZone(nyZone).toEpochSecond()
+            out.add(PricePoint(ts, c))
         }
         return out
     }

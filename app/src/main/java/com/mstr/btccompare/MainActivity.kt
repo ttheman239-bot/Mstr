@@ -45,20 +45,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.mstr.btccompare.data.CandlePoint
-import com.mstr.btccompare.ui.CandleChart
-import com.mstr.btccompare.ui.LineChart
+import com.mstr.btccompare.data.PricePoint
+import com.mstr.btccompare.ui.ChartSeries
 import com.mstr.btccompare.ui.MainViewModel
 import com.mstr.btccompare.ui.UiState
+import com.mstr.btccompare.ui.ZoomLineChart
 
 private val Bg = Color(0xFF0B0F19)
 private val Card = Color(0xFF111827)
 private val BtcOrange = Color(0xFFF7931A)
+private val BtcAmber = Color(0xFFFFC68A)
 private val MstrBlue = Color(0xFF60A5FA)
 private val UpGreen = Color(0xFF22C55E)
 private val DownRed = Color(0xFFEF4444)
 private val Muted = Color(0xFF94A3B8)
 private val Grid = Color(0xFF1F2937)
+private val TooltipBg = Color(0xCC1F2937)
 
 class MainActivity : ComponentActivity() {
 
@@ -93,7 +95,7 @@ fun AppScreen(vm: MainViewModel = viewModel()) {
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            "BTC aligned to NYSE 9:30 / 16:00 ET",
+                            "Tap to inspect • pinch to zoom • double-tap to reset",
                             color = Muted,
                             fontSize = 11.sp
                         )
@@ -198,49 +200,51 @@ private fun ErrorView(message: String, onRetry: () -> Unit) {
 @Composable
 private fun ReadyView(state: UiState.Ready) {
     val data = state.data
-    val btcPct = pctChange(data.btc)
-    val mstrPct = pctChange(data.mstr)
+    val btcPct = pctChange(data.btcAtUsClose)
+    val mstrPct = pctChange(data.mstrClose)
 
     Column(modifier = Modifier.fillMaxWidth()) {
         SummaryRow(
-            btc = data.latestBtc,
+            btc = data.latestBtcUsClose,
             mstr = data.latestMstr,
             ratio = data.ratio.lastOrNull()?.value ?: 0.0,
             btcPct = btcPct,
             mstrPct = mstrPct
         )
         Spacer(Modifier.height(12.dp))
+        Legend()
+        Spacer(Modifier.height(8.dp))
 
         ChartCard(
-            title = "BTC/USD — session candles (NYSE hours)",
-            subtitle = "Open = 9:30 ET, Close = 16:00 ET",
-            colorAccent = BtcOrange
+            title = "BTC vs MSTR",
+            subtitle = "BTC open = ราคา BTC ตอน US ปิด (16:00 ET) • BTC close = ราคา BTC ตอน US เปิด (9:30 ET)",
+            colorAccent = BtcOrange,
+            heightDp = 320
         ) {
-            CandleChart(
-                candles = data.btc,
-                upColor = UpGreen,
-                downColor = DownRed,
+            ZoomLineChart(
+                series = listOf(
+                    ChartSeries(
+                        label = "BTC open (US close)",
+                        color = BtcOrange,
+                        points = data.btcAtUsClose
+                    ),
+                    ChartSeries(
+                        label = "BTC close (US open)",
+                        color = BtcAmber,
+                        points = data.btcAtUsOpen,
+                        dashed = true
+                    ),
+                    ChartSeries(
+                        label = "MSTR",
+                        color = MstrBlue,
+                        points = data.mstrClose,
+                        rightAxis = true
+                    )
+                ),
                 gridColor = Grid,
                 axisColor = Muted,
-                leftAxisColor = BtcOrange,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-
-        Spacer(Modifier.height(12.dp))
-
-        ChartCard(
-            title = "MSTR — daily candles",
-            subtitle = "NASDAQ regular session",
-            colorAccent = MstrBlue
-        ) {
-            CandleChart(
-                candles = data.mstr,
-                upColor = UpGreen,
-                downColor = DownRed,
-                gridColor = Grid,
-                axisColor = Muted,
-                leftAxisColor = MstrBlue,
+                tooltipBg = TooltipBg,
+                tooltipText = Color.White,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -251,21 +255,29 @@ private fun ReadyView(state: UiState.Ready) {
             title = "BTC / MSTR ratio",
             subtitle = "USD of BTC per share of MSTR (close/close)",
             colorAccent = UpGreen,
-            heightDp = 200
+            heightDp = 220
         ) {
-            LineChart(
-                points = data.ratio,
-                lineColor = UpGreen,
-                fillColor = UpGreen,
+            ZoomLineChart(
+                series = listOf(
+                    ChartSeries(
+                        label = "Ratio",
+                        color = UpGreen,
+                        points = data.ratio,
+                        fill = true
+                    )
+                ),
                 gridColor = Grid,
                 axisColor = Muted,
+                tooltipBg = TooltipBg,
+                tooltipText = Color.White,
+                valueFormatter = { v -> "%.0f".format(v) },
                 modifier = Modifier.fillMaxSize()
             )
         }
 
         Spacer(Modifier.height(8.dp))
         Text(
-            "ข้อมูล: Yahoo Finance (BTC-USD 1h aligned to NYSE 9:30/16:00 ET, MSTR 1d)",
+            "ข้อมูล: Yahoo Finance — BTC-USD 1h (NYSE-aligned), MSTR 1d",
             color = Muted,
             fontSize = 11.sp
         )
@@ -363,10 +375,37 @@ private fun StatCard(
     }
 }
 
-private fun pctChange(candles: List<CandlePoint>): Double {
-    if (candles.size < 2) return 0.0
-    val first = candles.first().open
-    val last = candles.last().close
+@Composable
+private fun Legend() {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Dot(BtcOrange)
+        Spacer(Modifier.size(6.dp))
+        Text("BTC open", color = Color.White, fontSize = 12.sp)
+        Spacer(Modifier.size(12.dp))
+        Dot(BtcAmber)
+        Spacer(Modifier.size(6.dp))
+        Text("BTC close", color = Color.White, fontSize = 12.sp)
+        Spacer(Modifier.size(12.dp))
+        Dot(MstrBlue)
+        Spacer(Modifier.size(6.dp))
+        Text("MSTR", color = Color.White, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun Dot(color: Color) {
+    Box(
+        modifier = Modifier
+            .size(10.dp)
+            .clip(CircleShape)
+            .background(color)
+    )
+}
+
+private fun pctChange(points: List<PricePoint>): Double {
+    if (points.size < 2) return 0.0
+    val first = points.first().value
+    val last = points.last().value
     if (first <= 0.0) return 0.0
     return (last - first) / first * 100.0
 }
