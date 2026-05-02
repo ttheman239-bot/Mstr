@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -50,10 +49,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.mstr.btccompare.data.ImbalanceComponent
+import com.mstr.btccompare.data.ImbalanceReport
+import com.mstr.btccompare.data.ImbalanceStats
+import com.mstr.btccompare.data.MarketWindow
 import com.mstr.btccompare.data.PricePoint
-import com.mstr.btccompare.data.SignalLine
-import com.mstr.btccompare.data.SignalReport
-import com.mstr.btccompare.data.SignalStats
 import com.mstr.btccompare.data.TradePlan
 import com.mstr.btccompare.data.Verdict
 import com.mstr.btccompare.ui.ChartSeries
@@ -99,16 +99,10 @@ fun AppScreen(vm: MainViewModel = viewModel()) {
             TopAppBar(
                 title = {
                     Column {
-                        Text(
-                            "MSTR/BTC Day-Trade Signal",
-                            color = Color.White,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            "ราคา BTC อิง NYSE 9:30 / 16:00 ET",
-                            color = Muted,
-                            fontSize = 11.sp
-                        )
+                        Text("MSTR ↔ BTC Imbalance",
+                            color = Color.White, fontWeight = FontWeight.SemiBold)
+                        Text("วิเคราะห์ช่วง MSTR ปิด แต่ BTC ยังเดิน",
+                            color = Muted, fontSize = 11.sp)
                     }
                 },
                 actions = {
@@ -176,15 +170,13 @@ private fun PeriodSelector(current: Int, onPick: (Int) -> Unit) {
 @Composable
 private fun LoadingView() {
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(360.dp),
+        modifier = Modifier.fillMaxWidth().height(360.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator(color = BtcOrange)
             Spacer(Modifier.height(12.dp))
-            Text("กำลังโหลดราคา...", color = Muted)
+            Text("กำลังโหลดราคาจาก Barchart...", color = Muted)
         }
     }
 }
@@ -192,9 +184,7 @@ private fun LoadingView() {
 @Composable
 private fun ErrorView(message: String, onRetry: () -> Unit) {
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(300.dp),
+        modifier = Modifier.fillMaxWidth().height(300.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -210,37 +200,31 @@ private fun ErrorView(message: String, onRetry: () -> Unit) {
 @Composable
 private fun ReadyView(state: UiState.Ready) {
     val data = state.data
-    val report = data.signal
-    val btcPct = pctChange(data.btcAtUsClose)
-    val mstrPct = pctChange(data.mstrClose)
-
+    val report = data.imbalance
     var diffMode by rememberSaveable { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
 
-        // ── 1. Trade plan banner (most important — at top)
-        TradePlanCard(report.plan, report.combinedScore)
-
-        Spacer(Modifier.height(12.dp))
-        // ── 2. Three signals
-        SignalsCard(report.signals)
-
-        Spacer(Modifier.height(12.dp))
-        // ── 3. Stats / sanity check
-        StatsCard(report.stats, data.periodDays)
+        if (report != null) {
+            ImbalanceCard(report)
+            Spacer(Modifier.height(12.dp))
+            ComponentsCard(report.components)
+            Spacer(Modifier.height(12.dp))
+            StatsCard(report.stats, data.periodDays)
+        } else {
+            EmptyImbalanceNote()
+        }
 
         Spacer(Modifier.height(16.dp))
-        // ── Price summary cards
+
         SummaryRow(
             btc = data.latestBtcUsClose,
             mstr = data.latestMstr,
-            btcPct = btcPct,
-            mstrPct = mstrPct
+            btcPct = pctChange(data.btcAtUsClose),
+            mstrPct = pctChange(data.mstrClose)
         )
-
         Spacer(Modifier.height(12.dp))
         DiffToggle(diffMode) { diffMode = it }
-
         Spacer(Modifier.height(8.dp))
 
         val btcSeries = if (diffMode) {
@@ -253,74 +237,52 @@ private fun ReadyView(state: UiState.Ready) {
             )
         } else {
             listOf(
-                ChartSeries(
-                    label = "BTC open (US close)",
-                    color = BtcOrange,
-                    points = data.btcAtUsClose
-                ),
-                ChartSeries(
-                    label = "BTC close (US open)",
-                    color = BtcAmber,
-                    points = data.btcAtUsOpen,
-                    dashed = true
-                )
+                ChartSeries("BTC @ US 16:00", BtcOrange, data.btcAtUsClose),
+                ChartSeries("BTC @ US 9:30", BtcAmber, data.btcAtUsOpen, dashed = true)
             )
         }
         val mstrSeries = if (diffMode) {
-            ChartSeries(
-                label = "MSTR open − close",
-                color = MstrBlue,
-                points = data.mstrOpenMinusClose,
-                rightAxis = true
-            )
+            ChartSeries("MSTR open − close", MstrBlue, data.mstrOpenMinusClose, rightAxis = true)
         } else {
-            ChartSeries(
-                label = "MSTR",
-                color = MstrBlue,
-                points = data.mstrClose,
-                rightAxis = true
-            )
+            ChartSeries("MSTR close", MstrBlue, data.mstrClose, rightAxis = true)
         }
 
         ChartCard(
             title = if (diffMode) "BTC vs MSTR (open − close)" else "BTC vs MSTR",
             subtitle = if (diffMode)
-                "Daily intraday change: BTC = US-close − US-open • MSTR = open − close"
+                "Daily intraday: BTC = US-close − US-open • MSTR = open − close"
             else
-                "BTC: ราคา ณ US 16:00 ET (เข้ม) และ 9:30 ET (ประ) • MSTR: close",
+                "BTC: ราคา ณ NYSE 16:00 ET (เข้ม) / 9:30 ET (ประ) • MSTR: close",
             colorAccent = BtcOrange,
             heightDp = 300
         ) {
             ZoomLineChart(
                 series = btcSeries + mstrSeries,
-                gridColor = Grid,
-                axisColor = Muted,
-                tooltipBg = TooltipBg,
-                tooltipText = Color.White,
+                gridColor = Grid, axisColor = Muted,
+                tooltipBg = TooltipBg, tooltipText = Color.White,
                 modifier = Modifier.fillMaxSize()
             )
         }
 
         Spacer(Modifier.height(8.dp))
         Text(
-            "BTC: Yahoo (1h, NYSE-aligned) • MSTR: ${data.mstrSource}",
-            color = Muted,
-            fontSize = 11.sp
+            "แหล่งข้อมูล: Barchart (^BTCUSD 60-min + MSTR 1d)",
+            color = Muted, fontSize = 11.sp
         )
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-//  Card 1 — Trade plan
-// ──────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+//  Card 1 — Imbalance headline
+// ──────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun TradePlanCard(plan: TradePlan, score: Int) {
+private fun ImbalanceCard(r: ImbalanceReport) {
     val (bg, fg) = when {
-        plan.verdict.isBuy && score >= 4 -> UpGreen to Color.Black
-        plan.verdict.isBuy -> UpGreen.copy(alpha = 0.85f) to Color.Black
-        plan.verdict.isSell && score <= -4 -> DownRed to Color.White
-        plan.verdict.isSell -> DownRed.copy(alpha = 0.85f) to Color.White
+        r.verdict.isBuy && r.combinedScore >= 4 -> UpGreen to Color.Black
+        r.verdict.isBuy -> UpGreen.copy(alpha = 0.85f) to Color.Black
+        r.verdict.isSell && r.combinedScore <= -4 -> DownRed to Color.White
+        r.verdict.isSell -> DownRed.copy(alpha = 0.85f) to Color.White
         else -> Card to Color.White
     }
     Column(
@@ -332,27 +294,18 @@ private fun TradePlanCard(plan: TradePlan, score: Int) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    plan.verdict.label,
-                    color = fg,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp
-                )
-                Text(
-                    plan.direction,
-                    color = fg.copy(alpha = 0.85f),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Text(r.verdict.label, color = fg, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text(r.direction, color = fg.copy(alpha = 0.85f), fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold)
             }
-            Text(
-                "score %+d".format(score),
-                color = fg,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp
-            )
+            Text("score %+d".format(r.combinedScore), color = fg,
+                fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         }
-        if (plan.entry > 0.0 && plan.stop != 0.0 && plan.target1 != 0.0) {
+        Spacer(Modifier.height(8.dp))
+        Text(r.headline, color = fg.copy(alpha = 0.9f), fontSize = 12.sp)
+
+        val plan = r.plan
+        if (plan.entry > 0.0 && plan.stop != 0.0) {
             Spacer(Modifier.height(10.dp))
             Row {
                 LevelChip("Entry", plan.entry, fg)
@@ -366,11 +319,9 @@ private fun TradePlanCard(plan: TradePlan, score: Int) {
             Spacer(Modifier.height(8.dp))
             Text(
                 "%d shares × $%,.2f = $%,.0f notional • risk $%,.0f (2%% of $%,.0f)".format(
-                    plan.shares, plan.entry, plan.notional,
-                    plan.riskAmount, plan.accountSize
+                    plan.shares, plan.entry, plan.notional, plan.riskAmount, plan.accountSize
                 ),
-                color = fg.copy(alpha = 0.85f),
-                fontSize = 11.sp
+                color = fg.copy(alpha = 0.85f), fontSize = 11.sp
             )
         }
     }
@@ -385,19 +336,16 @@ private fun LevelChip(label: String, price: Double, fg: Color) {
             .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
         Text(label, color = fg.copy(alpha = 0.85f), fontSize = 10.sp)
-        Text(
-            "$%,.2f".format(price),
-            color = fg, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
-        )
+        Text("$%,.2f".format(price), color = fg, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-//  Card 2 — Signals
-// ──────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+//  Card 2 — three imbalance components
+// ──────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun SignalsCard(signals: List<SignalLine>) {
+private fun ComponentsCard(components: List<ImbalanceComponent>) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -405,62 +353,55 @@ private fun SignalsCard(signals: List<SignalLine>) {
             .background(Card)
             .padding(14.dp)
     ) {
-        Text(
-            "Signals (3 indicators)",
-            color = Color.White,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 14.sp
-        )
+        Text("Imbalance channels", color = Color.White,
+            fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         Spacer(Modifier.height(8.dp))
-        signals.forEachIndexed { idx, s ->
-            if (idx > 0) Spacer(Modifier.height(8.dp))
-            SignalRow(s)
+        components.forEachIndexed { i, c ->
+            if (i > 0) Spacer(Modifier.height(8.dp))
+            ComponentRow(c)
         }
     }
 }
 
 @Composable
-private fun SignalRow(s: SignalLine) {
+private fun ComponentRow(c: ImbalanceComponent) {
+    val titleColor = if (c.active) Color.White else Muted
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(s.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(c.title, color = titleColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            Text(s.value, color = Color.White, fontSize = 13.sp)
-            Spacer(Modifier.size(8.dp))
-            ScorePill(s.score)
+            ScorePill(c.score, c.active)
         }
-        Text(s.explanation, color = Muted, fontSize = 11.sp)
+        Text(c.displayValue, color = titleColor, fontSize = 12.sp)
+        Text(c.explanation, color = Muted, fontSize = 11.sp)
     }
 }
 
 @Composable
-private fun ScorePill(score: Int) {
+private fun ScorePill(score: Int, active: Boolean) {
     val color = when {
+        !active -> Muted
         score > 0 -> UpGreen
         score < 0 -> DownRed
         else -> Muted
     }
+    val text = if (!active) "n/a" else "%+d".format(score)
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
             .background(color.copy(alpha = 0.25f))
             .padding(horizontal = 8.dp, vertical = 2.dp)
     ) {
-        Text(
-            "%+d".format(score),
-            color = color,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold
-        )
+        Text(text, color = color, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-//  Card 3 — Stats
-// ──────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+//  Card 3 — sanity stats
+// ──────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun StatsCard(stats: SignalStats, periodDays: Int) {
+private fun StatsCard(s: ImbalanceStats, periodDays: Int) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -468,37 +409,30 @@ private fun StatsCard(stats: SignalStats, periodDays: Int) {
             .background(Card)
             .padding(14.dp)
     ) {
-        Text(
-            "Stats (${stats.sampleSize} of ${periodDays}d)",
-            color = Color.White,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 14.sp
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-            "ค่าเหล่านี้ใช้คำนวณ signals ด้านบน",
-            color = Muted,
-            fontSize = 11.sp
-        )
+        Text("Stats (n=${s.sampleSize} of ${periodDays}d)",
+            color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        Text("ตัวเลขทั้งหมดที่ใช้คำนวณสัญญาณด้านบน",
+            color = Muted, fontSize = 11.sp)
         Spacer(Modifier.height(10.dp))
 
-        StatRow("Ratio mean (μ)", "%.6f".format(stats.ratioMean))
-        StatRow("Ratio σ", "%.6f".format(stats.ratioStdev))
-        StatRow("Ratio Z (now)",
-            stats.zScore60?.let { "%+.2f".format(it) } ?: "—")
+        StatRow("Market window", windowLabel(s.window))
+        StatRow("MSTR last close", "$%,.2f".format(s.mstrLastClose))
+        StatRow("BTC at MSTR last close", "$%,.0f".format(s.btcAtLastMstrClose))
+        StatRow("BTC latest", "$%,.0f (อายุ %d นาที)".format(s.btcLatest, s.btcLatestAgeMin))
+        StatRow("Expected next open", "$%,.2f (%+.2f%%)"
+            .format(s.expectedNextOpen, s.expectedGapPct * 100))
         Spacer(Modifier.height(6.dp))
-        StatRow("RSI(14)",
-            stats.rsi14?.let { "%.0f".format(it) } ?: "—")
+        StatRow("Gap regression β", "%.2f".format(s.gapBeta))
+        StatRow("Gap regression α", "%.4f".format(s.gapAlpha))
+        StatRow("Gap regression ρ", "%.2f".format(s.gapRho))
+        StatRow("Gap residual σ", "%.2f%%".format(s.gapResidualStd * 100))
         Spacer(Modifier.height(6.dp))
-        StatRow("Gap β (slope)", "%.2f".format(stats.gapBeta))
-        StatRow("Gap α (intercept)", "%.4f".format(stats.gapAlpha))
-        StatRow("Gap ρ (correlation)", "%.2f".format(stats.gapCorrelation))
-        StatRow(
-            "Gap residual σ",
-            "%.2f%%".format(stats.gapResidualStd * 100)
-        )
+        StatRow("Intraday β", "%.2f".format(s.intradayBeta))
+        StatRow("Intraday α", "%.4f".format(s.intradayAlpha))
+        StatRow("Intraday ρ", "%.2f".format(s.intradayRho))
+        StatRow("Intraday residual σ", "%.2f%%".format(s.intradayResidualStd * 100))
         Spacer(Modifier.height(6.dp))
-        StatRow("ATR(14) — MSTR", "$%.2f".format(stats.atr14))
+        StatRow("ATR(14) MSTR", "$%.2f".format(s.atr14))
     }
 }
 
@@ -510,9 +444,34 @@ private fun StatRow(label: String, value: String) {
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────
+private fun windowLabel(w: MarketWindow): String = when (w) {
+    MarketWindow.RegularSession -> "เปิด (9:30–16:00 ET)"
+    MarketWindow.AfterHours -> "หลังปิด (16:00–24:00 ET)"
+    MarketWindow.Closed -> "ปิด (pre-market / สุดสัปดาห์)"
+}
+
+@Composable
+private fun EmptyImbalanceNote() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Card)
+            .padding(14.dp)
+    ) {
+        Text("ยังไม่มีสัญญาณ", color = Color.White,
+            fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        Text(
+            "Barchart ไม่ได้คืน BTC hourly bars (อาจถูก Cloudflare บล็อก) → " +
+                "เครื่องคำนวณ imbalance ทำงานไม่ได้",
+            color = Muted, fontSize = 11.sp
+        )
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
 //  Bottom: price summary + chart
-// ──────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
 
 @Composable
 private fun SummaryRow(btc: Double, mstr: Double, btcPct: Double, mstrPct: Double) {
@@ -527,11 +486,7 @@ private fun SummaryRow(btc: Double, mstr: Double, btcPct: Double, mstrPct: Doubl
 
 @Composable
 private fun StatCard(
-    label: String,
-    value: String,
-    change: Double,
-    accent: Color,
-    modifier: Modifier = Modifier
+    label: String, value: String, change: Double, accent: Color, modifier: Modifier = Modifier
 ) {
     Column(
         modifier = modifier
@@ -559,19 +514,13 @@ private fun DiffToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                "Mode: open − close",
-                color = Color.White,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold
-            )
+            Text("Mode: open − close", color = Color.White,
+                fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             Text(
                 if (checked)
                     "เส้นเดียว: BTC = US-close − US-open • MSTR = open − close"
-                else
-                    "แสดง 2 เส้น BTC + MSTR ปกติ",
-                color = Muted,
-                fontSize = 11.sp
+                else "แสดง 2 เส้น BTC + MSTR ปกติ",
+                color = Muted, fontSize = 11.sp
             )
         }
         Switch(
@@ -589,10 +538,7 @@ private fun DiffToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
 
 @Composable
 private fun ChartCard(
-    title: String,
-    subtitle: String,
-    colorAccent: Color,
-    heightDp: Int = 280,
+    title: String, subtitle: String, colorAccent: Color, heightDp: Int = 280,
     content: @Composable () -> Unit
 ) {
     Column(
@@ -605,9 +551,7 @@ private fun ChartCard(
         Text(title, color = colorAccent, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         Text(subtitle, color = Muted, fontSize = 11.sp)
         Spacer(Modifier.height(8.dp))
-        Box(modifier = Modifier
-            .fillMaxWidth()
-            .height(heightDp.dp)) {
+        Box(modifier = Modifier.fillMaxWidth().height(heightDp.dp)) {
             content()
         }
     }

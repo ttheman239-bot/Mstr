@@ -7,14 +7,10 @@ import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.json.JSONObject
-import java.net.URLDecoder
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZonedDateTime
-import java.time.format.DateTimeFormatter
 import java.util.concurrent.TimeUnit
 
 data class PricePoint(val timestampSec: Long, val value: Double)
@@ -29,91 +25,126 @@ data class CompareSeries(
     val mstrOpenMinusClose: List<PricePoint>,
     val ratio: List<PricePoint>,
 
-    // Raw daily MSTR OHLC (used by signal engine for ATR)
-    val mstrBars: List<MstrBar>,
-
-    // Metadata
+    // Latest snapshots
     val latestBtcUsClose: Double,
     val latestBtcUsOpen: Double,
     val latestMstr: Double,
-    val mstrSource: String,
     val periodDays: Int,
 
-    // Signal output
-    val signal: SignalReport
+    // Imbalance signal output (null if engine couldn't run)
+    val imbalance: ImbalanceReport?
 )
 
 class PriceRepository {
 
     private val nyZone: ZoneId = ZoneId.of("America/New_York")
-
     private val cookieJar = SimpleCookieJar()
 
-    private val client = OkHttpClient.Builder()
+    private val client: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(cookieJar)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
 
+    private val barchart = BarchartClient(client, cookieJar)
+
     suspend fun load(periodDays: Int = 365): CompareSeries = coroutineScope {
-        val btcDeferred = async(Dispatchers.IO) { fetchBtcPerDay(periodDays) }
-        val mstrDeferred = async(Dispatchers.IO) { fetchMstrSeries(periodDays) }
-        val btc = btcDeferred.await()
-        val (mstrDays, mstrSource) = mstrDeferred.await()
+        val mstrJob = async(Dispatchers.IO) {
+            // request slightly more than periodDays in case of holidays/weekends
+            barchart.fetchEod("MSTR", periodDays + 30)
+        }
+        val btcHourlyJob = async(Dispatchers.IO) {
+            // 60-minute bars give us NYSE-aligned 9:30 / 16:00 readings.
+            // Cap at 90 days hourly so the response stays small and so the
+            // imbalance regression has plenty but not too much history.
+            val daysHourly = periodDays.coerceAtMost(90)
+            // 24 hourly bars × daysHourly + buffer
+            val maxRecords = (daysHourly * 24 + 48).coerceAtMost(2400)
+            barchart.fetchIntraday("^BTCUSD", 60, maxRecords)
+        }
+        val btcDailyJob = async(Dispatchers.IO) {
+            // Daily bars used for the long-period chart line (fallback when
+            // hourly history is shorter than periodDays).
+            barchart.fetchEod("^BTCUSD", periodDays + 30)
+        }
 
-        val mstrByDay = mstrDays.associateBy { it.date }
+        val mstrDays = mstrJob.await()
+        val btcHourly = btcHourlyJob.await()
+        val btcDaily = btcDailyJob.await()
 
-        val btcAtUsClose = ArrayList<PricePoint>(btc.size)
-        val btcAtUsOpen = ArrayList<PricePoint>(btc.size)
-        val ratio = ArrayList<PricePoint>(btc.size)
-        for (d in btc) {
-            val mstrDay = mstrByDay[d.date] ?: continue
-            val tsClose = d.date.atTime(16, 0).atZone(nyZone).toEpochSecond()
-            val tsOpen = d.date.atTime(9, 30).atZone(nyZone).toEpochSecond()
-            d.atUsClose?.let { btcAtUsClose.add(PricePoint(tsClose, it)) }
-            d.atUsOpen?.let { btcAtUsOpen.add(PricePoint(tsOpen, it)) }
-            d.atUsClose?.let { ratio.add(PricePoint(tsClose, it / mstrDay.close)) }
+        // ── Build per-NYSE-date BTC@9:30 / @16:00 from hourly bars when we
+        //    have them; for older dates fall back to daily open / close.
+        val btcByDate = LinkedHashMap<LocalDate, BtcDayPoint>()
+
+        // (a) hourly-derived snapshots
+        btcHourly.groupBy { it.localDateTime.toLocalDate() }
+            .forEach { (date, bars) ->
+                val sorted = bars.sortedBy { it.localDateTime }
+                val nearOpen = sorted.minByOrNull {
+                    val mins = it.localDateTime.toLocalTime().toSecondOfDay() / 60
+                    kotlin.math.abs(mins - (9 * 60 + 30))
+                }
+                val nearClose = sorted.minByOrNull {
+                    val mins = it.localDateTime.toLocalTime().toSecondOfDay() / 60
+                    kotlin.math.abs(mins - 16 * 60)
+                }
+                btcByDate[date] = BtcDayPoint(
+                    atUsOpen = nearOpen?.open,
+                    atUsClose = nearClose?.close
+                )
+            }
+
+        // (b) for any date we don't have hourly coverage, pad with daily bar
+        for (db in btcDaily) {
+            if (!btcByDate.containsKey(db.date)) {
+                btcByDate[db.date] = BtcDayPoint(atUsOpen = db.open, atUsClose = db.close)
+            }
+        }
+
+        // ── Cross-align with MSTR trading days
+        val mstrByDate = mstrDays.associateBy { it.date }
+        val tradingDates = (btcByDate.keys intersect mstrByDate.keys).sorted()
+
+        val btcAtUsClose = ArrayList<PricePoint>()
+        val btcAtUsOpen = ArrayList<PricePoint>()
+        val ratio = ArrayList<PricePoint>()
+        for (date in tradingDates) {
+            val b = btcByDate[date] ?: continue
+            val tsClose = date.atTime(16, 0).atZone(nyZone).toEpochSecond()
+            val tsOpen = date.atTime(9, 30).atZone(nyZone).toEpochSecond()
+            b.atUsClose?.let { btcAtUsClose.add(PricePoint(tsClose, it)) }
+            b.atUsOpen?.let { btcAtUsOpen.add(PricePoint(tsOpen, it)) }
+            val mstrClose = mstrByDate[date]?.close ?: 0.0
+            if (mstrClose > 0.0 && b.atUsClose != null) {
+                ratio.add(PricePoint(tsClose, b.atUsClose / mstrClose))
+            }
         }
 
         val btcOpenByDay = btcAtUsOpen.associateBy { dayKey(it.timestampSec) }
-        val btcOpenMinusClose = btcAtUsClose.mapNotNull { closePt ->
-            val openVal = btcOpenByDay[dayKey(closePt.timestampSec)]?.value
-                ?: return@mapNotNull null
-            PricePoint(closePt.timestampSec, closePt.value - openVal)
+        val btcOpenMinusClose = btcAtUsClose.mapNotNull { c ->
+            val o = btcOpenByDay[dayKey(c.timestampSec)]?.value ?: return@mapNotNull null
+            PricePoint(c.timestampSec, c.value - o)
         }
 
-        val firstBtcTs = btcAtUsClose.firstOrNull()?.timestampSec ?: 0L
-        val mstrAlignedDays = mstrDays.filter {
-            it.date.atTime(16, 0).atZone(nyZone).toEpochSecond() >= firstBtcTs
-        }
-        val mstrClose = mstrAlignedDays.map {
+        val mstrAligned = mstrDays.filter { tradingDates.contains(it.date) }
+        val mstrClose = mstrAligned.map {
             PricePoint(it.date.atTime(16, 0).atZone(nyZone).toEpochSecond(), it.close)
         }
-        val mstrOpen = mstrAlignedDays.map {
+        val mstrOpen = mstrAligned.map {
             PricePoint(it.date.atTime(9, 30).atZone(nyZone).toEpochSecond(), it.open)
         }
-        val mstrOpenMinusClose = mstrAlignedDays.map {
+        val mstrOpenMinusClose = mstrAligned.map {
             PricePoint(
                 it.date.atTime(16, 0).atZone(nyZone).toEpochSecond(),
                 it.open - it.close
             )
         }
-        val mstrBars = mstrAlignedDays.map {
-            MstrBar(
-                timestampSec = it.date.atTime(16, 0).atZone(nyZone).toEpochSecond(),
-                open = it.open,
-                high = it.high,
-                low = it.low,
-                close = it.close
-            )
-        }
 
-        val signal = SignalEngine.analyze(
-            btcAtUsClose = btcAtUsClose,
-            btcAtUsOpen = btcAtUsOpen,
-            mstrBars = mstrBars,
-            ratio = ratio
-        )
+        // ── Run imbalance engine.  Needs hourly BTC + daily MSTR.
+        val nowEt = ZonedDateTime.ofInstant(Instant.now(), nyZone).toLocalDateTime()
+        val imbalance = if (btcHourly.size >= 50) {
+            ImbalanceEngine.analyze(btcHourly, mstrAligned, nowEt)
+        } else null
 
         CompareSeries(
             btcAtUsClose = btcAtUsClose,
@@ -123,199 +154,21 @@ class PriceRepository {
             mstrOpen = mstrOpen,
             mstrOpenMinusClose = mstrOpenMinusClose,
             ratio = ratio,
-            mstrBars = mstrBars,
             latestBtcUsClose = btcAtUsClose.lastOrNull()?.value ?: 0.0,
             latestBtcUsOpen = btcAtUsOpen.lastOrNull()?.value ?: 0.0,
             latestMstr = mstrClose.lastOrNull()?.value ?: 0.0,
-            mstrSource = mstrSource,
             periodDays = periodDays,
-            signal = signal
+            imbalance = imbalance
         )
     }
 
     private fun dayKey(epochSec: Long): LocalDate =
         ZonedDateTime.ofInstant(Instant.ofEpochSecond(epochSec), nyZone).toLocalDate()
 
-    private data class BtcDayValues(
-        val date: LocalDate,
-        val atUsOpen: Double?,
-        val atUsClose: Double?
-    )
-
-    private fun fetchBtcPerDay(periodDays: Int): List<BtcDayValues> {
-        val effDays = periodDays.coerceAtMost(720)
-        val end = System.currentTimeMillis() / 1000L
-        val start = end - effDays.toLong() * 24L * 3600L - 7L * 24L * 3600L
-        val url = "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD" +
-            "?period1=$start&period2=$end&interval=1h&events=history"
-        val s = fetchYahooSeries(url)
-
-        data class Acc(var open: Double? = null, var close: Double? = null)
-        val byDay = LinkedHashMap<LocalDate, Acc>()
-        for (i in s.timestamp.indices) {
-            val o = s.open[i] ?: continue
-            val c = s.close[i] ?: continue
-            val zdt = ZonedDateTime.ofInstant(Instant.ofEpochSecond(s.timestamp[i]), nyZone)
-            val dow = zdt.dayOfWeek.value
-            if (dow == 6 || dow == 7) continue
-            val date = zdt.toLocalDate()
-            val hour = zdt.hour
-            val acc = byDay.getOrPut(date) { Acc() }
-            if (hour == 9 && acc.open == null) acc.open = o
-            if (hour == 15) acc.close = c
-        }
-        return byDay.entries
-            .map { (date, a) -> BtcDayValues(date, atUsOpen = a.open, atUsClose = a.close) }
-            .sortedBy { it.date }
-            .takeLast(periodDays)
-    }
-
-    private data class MstrDay(
-        val date: LocalDate,
-        val open: Double,
-        val high: Double,
-        val low: Double,
-        val close: Double
-    )
-
-    /** Returns (days, sourceName) and falls back to Yahoo if Barchart fails. */
-    private fun fetchMstrSeries(days: Int): Pair<List<MstrDay>, String> {
-        return try {
-            fetchMstrFromBarchart(days) to "Barchart"
-        } catch (t: Throwable) {
-            fetchMstrFromYahoo(days) to "Yahoo (fallback)"
-        }
-    }
-
-    private fun fetchMstrFromBarchart(days: Int): List<MstrDay> {
-        val primeUrl = "https://www.barchart.com/stocks/quotes/MSTR/price-history/historical"
-        val primeReq = Request.Builder()
-            .url(primeUrl)
-            .header("User-Agent", BROWSER_UA)
-            .header("Accept", "text/html,application/xhtml+xml")
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .build()
-        client.newCall(primeReq).execute().use { it.body?.close() }
-
-        val barchartHost = HttpUrl.Builder().scheme("https").host("www.barchart.com").build()
-        val cookies = cookieJar.loadForRequest(barchartHost)
-        val xsrfRaw = cookies.firstOrNull { it.name == "XSRF-TOKEN" }?.value
-            ?: error("No XSRF-TOKEN cookie from Barchart")
-        val xsrfToken = URLDecoder.decode(xsrfRaw, "UTF-8")
-
-        val maxRecords = (days + 30).coerceAtMost(2200)
-        val apiUrl = "https://www.barchart.com/proxies/timeseries/queryeod.ashx" +
-            "?symbol=MSTR&data=daily&maxrecords=$maxRecords" +
-            "&volume=contract&order=asc&dividends=false&backadjust=false" +
-            "&daystoexpiration=1&contractroll=expiration"
-        val req = Request.Builder()
-            .url(apiUrl)
-            .header("User-Agent", BROWSER_UA)
-            .header("Accept", "*/*")
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Referer", primeUrl)
-            .header("X-XSRF-TOKEN", xsrfToken)
-            .header("X-Requested-With", "XMLHttpRequest")
-            .build()
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("Barchart HTTP ${resp.code}")
-            val body = resp.body?.string()?.trim().orEmpty()
-            if (body.isEmpty()) error("Empty Barchart body")
-            // Format per row: SYMBOL,YYYYMMDD,open,high,low,close,volume
-            val fmt = DateTimeFormatter.ofPattern("yyyyMMdd")
-            val out = ArrayList<MstrDay>()
-            body.lineSequence().forEach { rawLine ->
-                val line = rawLine.trim()
-                if (line.isEmpty()) return@forEach
-                val parts = line.split(",")
-                if (parts.size < 7) return@forEach
-                val open = parts[2].toDoubleOrNull() ?: return@forEach
-                val high = parts[3].toDoubleOrNull() ?: return@forEach
-                val low = parts[4].toDoubleOrNull() ?: return@forEach
-                val close = parts[5].toDoubleOrNull() ?: return@forEach
-                val date = try {
-                    LocalDate.parse(parts[1], fmt)
-                } catch (e: Exception) {
-                    return@forEach
-                }
-                out.add(MstrDay(date, open, high, low, close))
-            }
-            if (out.isEmpty()) error("No usable Barchart rows")
-            return out.sortedBy { it.date }.takeLast(days)
-        }
-    }
-
-    private fun fetchMstrFromYahoo(days: Int): List<MstrDay> {
-        val end = System.currentTimeMillis() / 1000L
-        val start = end - days.toLong() * 24L * 3600L - 7L * 24L * 3600L
-        val url = "https://query1.finance.yahoo.com/v8/finance/chart/MSTR" +
-            "?period1=$start&period2=$end&interval=1d&events=history"
-        val s = fetchYahooSeries(url)
-        val out = ArrayList<MstrDay>(s.timestamp.size)
-        for (i in s.timestamp.indices) {
-            val o = s.open[i] ?: continue
-            val h = s.high[i] ?: continue
-            val l = s.low[i] ?: continue
-            val c = s.close[i] ?: continue
-            val zdt = ZonedDateTime.ofInstant(Instant.ofEpochSecond(s.timestamp[i]), nyZone)
-            out.add(MstrDay(zdt.toLocalDate(), o, h, l, c))
-        }
-        return out
-    }
-
-    private data class Series(
-        val timestamp: List<Long>,
-        val open: List<Double?>,
-        val high: List<Double?>,
-        val low: List<Double?>,
-        val close: List<Double?>
-    )
-
-    private fun fetchYahooSeries(url: String): Series {
-        val req = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .header("User-Agent", "Mozilla/5.0 (Android) MstrBtc/1.0")
-            .build()
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("Yahoo HTTP ${resp.code}")
-            val body = resp.body?.string() ?: error("Empty Yahoo body")
-            val root = JSONObject(body)
-            val chart = root.getJSONObject("chart")
-            val result = chart.optJSONArray("result")
-                ?: error("Yahoo returned no result")
-            if (result.length() == 0) error("Empty Yahoo result")
-            val first = result.getJSONObject(0)
-            val tsArr = first.getJSONArray("timestamp")
-            val q = first.getJSONObject("indicators").getJSONArray("quote").getJSONObject(0)
-            val openArr = q.getJSONArray("open")
-            val highArr = q.getJSONArray("high")
-            val lowArr = q.getJSONArray("low")
-            val closeArr = q.getJSONArray("close")
-            val ts = ArrayList<Long>(tsArr.length())
-            val op = ArrayList<Double?>(tsArr.length())
-            val hi = ArrayList<Double?>(tsArr.length())
-            val lo = ArrayList<Double?>(tsArr.length())
-            val cl = ArrayList<Double?>(tsArr.length())
-            for (i in 0 until tsArr.length()) {
-                ts.add(tsArr.getLong(i))
-                op.add(if (openArr.isNull(i)) null else openArr.getDouble(i))
-                hi.add(if (highArr.isNull(i)) null else highArr.getDouble(i))
-                lo.add(if (lowArr.isNull(i)) null else lowArr.getDouble(i))
-                cl.add(if (closeArr.isNull(i)) null else closeArr.getDouble(i))
-            }
-            return Series(ts, op, hi, lo, cl)
-        }
-    }
-
-    private companion object {
-        const val BROWSER_UA =
-            "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/126.0.0.0 Mobile Safari/537.36"
-    }
+    private data class BtcDayPoint(val atUsOpen: Double?, val atUsClose: Double?)
 }
 
-private class SimpleCookieJar : CookieJar {
+internal class SimpleCookieJar : CookieJar {
     private val store = mutableMapOf<String, MutableList<Cookie>>()
 
     @Synchronized
