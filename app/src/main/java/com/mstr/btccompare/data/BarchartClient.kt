@@ -32,19 +32,19 @@ class BarchartClient(private val client: OkHttpClient, private val cookieJar: Co
     private var primed: Boolean = false
 
     private fun prime(symbol: String) {
-        // Use the lightest dynamic page that still goes through Laravel
-        // and sets XSRF-TOKEN.  /login is a small page (~30 KB) and
-        // works for both stocks and crypto symbols.  Falls back to the
-        // symbol-specific page only if /login doesn't yield a token.
-        val candidateUrls = listOf(
-            "https://www.barchart.com/login",
-            if (symbol.startsWith("^"))
-                "https://www.barchart.com/crypto/quotes/${symbol}/overview"
-            else
-                "https://www.barchart.com/stocks/quotes/${symbol}/price-history/historical"
-        )
+        // The symbol-specific price-history page is the only URL we have
+        // proven to set the full set of cookies the timeseries proxy
+        // checks (XSRF-TOKEN + laravel_session + market_*).  /login alone
+        // sets XSRF-TOKEN but the API still returns garbage for the
+        // queryeod.ashx call, so we always prime with the real page.
+        val url = if (symbol.startsWith("^"))
+            "https://www.barchart.com/crypto/quotes/${symbol}/overview"
+        else
+            "https://www.barchart.com/stocks/quotes/${symbol}/price-history/historical"
+
+        // Two attempts on transient timeout / 5xx.
         var lastError: Throwable? = null
-        for (url in candidateUrls) {
+        for (attempt in 1..2) {
             try {
                 val req = Request.Builder()
                     .url(url)
@@ -53,8 +53,11 @@ class BarchartClient(private val client: OkHttpClient, private val cookieJar: Co
                     .header("Accept-Language", "en-US,en;q=0.9")
                     .header("Cache-Control", "no-cache")
                     .build()
-                client.newCall(req).execute().use { it.body?.close() }
-                // Did we actually get the cookie?
+                client.newCall(req).execute().use { resp ->
+                    // We only need cookies (set on response headers),
+                    // not the body — close immediately.
+                    resp.body?.close()
+                }
                 val host = HttpUrl.Builder().scheme("https").host("www.barchart.com").build()
                 val hasToken = cookieJar.loadForRequest(host).any { it.name == "XSRF-TOKEN" }
                 if (hasToken) {
@@ -64,9 +67,10 @@ class BarchartClient(private val client: OkHttpClient, private val cookieJar: Co
             } catch (t: Throwable) {
                 lastError = t
             }
+            if (attempt == 1) try { Thread.sleep(800) } catch (_: InterruptedException) {}
         }
         if (lastError != null) throw lastError
-        error("Barchart prime failed: ไม่ได้รับ XSRF-TOKEN")
+        error("Barchart prime: ไม่ได้รับ XSRF-TOKEN")
     }
 
     private fun xsrfToken(): String {
@@ -110,7 +114,14 @@ class BarchartClient(private val client: OkHttpClient, private val cookieJar: Co
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) error("Barchart EOD HTTP ${resp.code} ($symbol)")
             val body = resp.body?.string()?.trim().orEmpty()
-            if (body.isEmpty()) error("Empty Barchart EOD response ($symbol)")
+            if (body.isEmpty()) error("Barchart EOD ($symbol): empty body")
+            // If the response is HTML / JSON instead of CSV, we have an
+            // auth problem.  Sniff the first byte and surface that.
+            val firstChar = body.firstOrNull()
+            if (firstChar == '<' || firstChar == '{' || firstChar == '[') {
+                val preview = body.take(120).replace('\n', ' ')
+                error("Barchart EOD ($symbol): non-CSV response — $preview")
+            }
             val fmt = DateTimeFormatter.ofPattern("yyyyMMdd")
             val out = ArrayList<DayBar>()
             body.lineSequence().forEach { raw ->
@@ -125,7 +136,10 @@ class BarchartClient(private val client: OkHttpClient, private val cookieJar: Co
                 val close = p[5].toDoubleOrNull() ?: return@forEach
                 out.add(DayBar(date, open, high, low, close))
             }
-            if (out.isEmpty()) error("ไม่มี bar ที่ parse ได้จาก Barchart EOD ($symbol)")
+            if (out.isEmpty()) {
+                val preview = body.take(120).replace('\n', ' ')
+                error("Barchart EOD ($symbol): no parseable rows — $preview")
+            }
             return out.sortedBy { it.date }
         }
     }
