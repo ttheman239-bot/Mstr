@@ -42,8 +42,10 @@ class PriceRepository {
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(cookieJar)
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
+        .callTimeout(60, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private val barchart = BarchartClient(client, cookieJar)
@@ -52,22 +54,34 @@ class PriceRepository {
 
     suspend fun load(periodDays: Int = 365): CompareSeries = coroutineScope {
         val mstrJob = async(Dispatchers.IO) {
-            barchart.fetchEod("MSTR", periodDays + 30)
+            // Barchart's prime page can be slow on Asian mobile networks
+            // (~MB of HTML through Cloudflare).  Retry once on timeout.
+            try {
+                barchart.fetchEod("MSTR", periodDays + 30)
+            } catch (t: Throwable) {
+                if (t is java.net.SocketTimeoutException ||
+                    t is java.io.InterruptedIOException) {
+                    try { barchart.fetchEod("MSTR", periodDays + 30) }
+                    catch (t2: Throwable) {
+                        throw RuntimeException("MSTR (Barchart): ${t2.message ?: "ดึงไม่ได้"}")
+                    }
+                } else {
+                    throw RuntimeException("MSTR (Barchart): ${t.message ?: "ดึงไม่ได้"}")
+                }
+            }
         }
         val btcHourlyJob = async(Dispatchers.IO) {
             // Primary: Binance public klines (no rate-limit, full OHLC).
             // Fallback: CoinGecko hourly close-only.  Last-resort: empty.
             try {
                 binance.fetchBtcHourly(periodDays.coerceAtMost(80))
-            } catch (t: Throwable) {
+            } catch (binErr: Throwable) {
                 runCatching {
                     coinGecko.fetchBtcHourly(periodDays.coerceAtMost(90))
                 }.getOrDefault(emptyList())
             }
         }
         val btcDailyJob = async(Dispatchers.IO) {
-            // For longer ranges, extend the chart line backwards with daily
-            // bars from Binance.
             if (periodDays > 80) {
                 runCatching { binance.fetchBtcDaily(periodDays + 30) }
                     .getOrDefault(emptyList())
