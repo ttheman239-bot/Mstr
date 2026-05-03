@@ -38,31 +38,30 @@ class BinanceClient(private val client: OkHttpClient) {
      */
     fun fetchBtcHourly(requestedDays: Int): List<MinuteBar> {
         // First page: most recent 1000 hours (~41 days).
-        val first = fetchKlines(interval = "1h", limit = 1000, endTime = null)
-        if (requestedDays <= 41 || first.isEmpty()) return first
-
+        val first = fetchKlinesRaw(interval = "1h", limit = 1000, endTime = null)
+        if (requestedDays <= 41 || first.isEmpty()) {
+            return first.map { it.toMinuteBar(nyZone) }
+        }
         // Second page: 1000 hours ending where the first one started.
         val firstOpenMs = first.first().openTimeMs
         val second = runCatching {
-            fetchKlines(interval = "1h", limit = 1000, endTime = firstOpenMs - 1)
+            fetchKlinesRaw(interval = "1h", limit = 1000, endTime = firstOpenMs - 1)
         }.getOrDefault(emptyList())
-        // Drop overlap (shouldn't be any with endTime cut-off, but be safe)
-        val combined = (second + first).distinctBy { it.openTimeMs }.sortedBy { it.openTimeMs }
-        return combined.map { it.toMinuteBar(nyZone) }
+        // Drop overlap (shouldn't be any with the endTime cut-off, but be safe)
+        return (second + first)
+            .distinctBy { it.openTimeMs }
+            .sortedBy { it.openTimeMs }
+            .map { it.toMinuteBar(nyZone) }
     }
 
     /** Daily-granularity series, used to extend the chart for >90-day periods. */
     fun fetchBtcDaily(days: Int): List<MinuteBar> {
         val limit = days.coerceAtMost(1000).coerceAtLeast(2)
-        val raws = fetchKlinesRaw(interval = "1d", limit = limit, endTime = null)
-        return raws.map { it.toMinuteBar(nyZone) }
+        return fetchKlinesRaw(interval = "1d", limit = limit, endTime = null)
+            .map { it.toMinuteBar(nyZone) }
     }
 
     // ── plumbing ─────────────────────────────────────────────────────────
-
-    private fun fetchKlines(interval: String, limit: Int, endTime: Long?): List<MinuteBar> {
-        return fetchKlinesRaw(interval, limit, endTime).map { it.toMinuteBar(nyZone) }
-    }
 
     private fun fetchKlinesRaw(interval: String, limit: Int, endTime: Long?): List<RawKline> {
         val builder = StringBuilder("https://api.binance.com/api/v3/klines")
