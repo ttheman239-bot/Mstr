@@ -122,14 +122,18 @@ class BarchartClient(private val client: OkHttpClient, private val cookieJar: Co
                 val preview = body.take(120).replace('\n', ' ')
                 error("Barchart EOD ($symbol): non-CSV response — $preview")
             }
-            val fmt = DateTimeFormatter.ofPattern("yyyyMMdd")
+            // Format per row: SYMBOL,YYYY-MM-DD,open,high,low,close,volume
+            // (Barchart actually returns ISO dates with dashes; we keep
+            // a fallback for the no-dash variant just in case.)
+            val isoFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+            val compactFmt = DateTimeFormatter.ofPattern("yyyyMMdd")
             val out = ArrayList<DayBar>()
             body.lineSequence().forEach { raw ->
                 val line = raw.trim()
                 if (line.isEmpty()) return@forEach
                 val p = line.split(",")
                 if (p.size < 7) return@forEach
-                val date = runCatching { LocalDate.parse(p[1], fmt) }.getOrElse { return@forEach }
+                val date = parseEodDate(p[1], isoFmt, compactFmt) ?: return@forEach
                 val open = p[2].toDoubleOrNull() ?: return@forEach
                 val high = p[3].toDoubleOrNull() ?: return@forEach
                 val low = p[4].toDoubleOrNull() ?: return@forEach
@@ -208,6 +212,13 @@ class BarchartClient(private val client: OkHttpClient, private val cookieJar: Co
     private fun parseTs(s: String, vararg fmts: DateTimeFormatter): LocalDateTime? {
         for (f in fmts) {
             runCatching { return LocalDateTime.parse(s, f) }
+        }
+        return null
+    }
+
+    private fun parseEodDate(s: String, vararg fmts: DateTimeFormatter): LocalDate? {
+        for (f in fmts) {
+            runCatching { return LocalDate.parse(s, f) }
         }
         return null
     }
