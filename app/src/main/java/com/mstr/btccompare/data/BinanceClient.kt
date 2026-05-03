@@ -64,41 +64,41 @@ class BinanceClient(private val client: OkHttpClient) {
     // ── plumbing ─────────────────────────────────────────────────────────
 
     private fun fetchKlinesRaw(interval: String, limit: Int, endTime: Long?): List<RawKline> {
-        val builder = StringBuilder("https://api.binance.com/api/v3/klines")
-            .append("?symbol=BTCUSDT&interval=").append(interval)
-            .append("&limit=").append(limit)
-        if (endTime != null) builder.append("&endTime=").append(endTime)
-
-        val req = Request.Builder()
-            .url(builder.toString())
-            .header("Accept", "application/json")
-            .header("User-Agent", "MstrBtcAndroid/1.0")
-            .build()
-
-        // One short retry on 429 / 5xx — Binance is rarely rate-limited but
-        // transient blips on mobile networks are common.
+        // Try the official host first, then the public read-only mirror.
+        // The mirror is sometimes faster from Asia.
+        val hosts = listOf("api.binance.com", "data-api.binance.vision")
         var lastErr: String = ""
-        for (attempt in 1..2) {
+        for ((idx, host) in hosts.withIndex()) {
+            val builder = StringBuilder("https://").append(host).append("/api/v3/klines")
+                .append("?symbol=BTCUSDT&interval=").append(interval)
+                .append("&limit=").append(limit)
+            if (endTime != null) builder.append("&endTime=").append(endTime)
+            val req = Request.Builder()
+                .url(builder.toString())
+                .header("Accept", "application/json")
+                .header("User-Agent", "MstrBtcAndroid/1.0")
+                .build()
             try {
                 client.newCall(req).execute().use { resp ->
                     if (resp.code == 429 || resp.code in 500..599) {
-                        lastErr = "Binance HTTP ${resp.code}"
-                        if (attempt == 1) {
-                            Thread.sleep(1500)
-                            return@use
-                        }
-                        error(lastErr)
+                        lastErr = "$host HTTP ${resp.code}"
+                        return@use
                     }
-                    if (!resp.isSuccessful) error("Binance HTTP ${resp.code}")
-                    val body = resp.body?.string() ?: error("Empty Binance body")
+                    if (!resp.isSuccessful) {
+                        lastErr = "$host HTTP ${resp.code}"
+                        return@use
+                    }
+                    val body = resp.body?.string() ?: run {
+                        lastErr = "$host empty body"; return@use
+                    }
                     return parseKlines(body)
                 }
             } catch (t: Throwable) {
-                if (attempt == 2) throw t
-                lastErr = t.message ?: "unknown"
+                lastErr = "$host ${t.message ?: "error"}"
+                if (idx == hosts.lastIndex) throw RuntimeException("Binance: $lastErr", t)
             }
         }
-        error("Binance fetch failed: $lastErr")
+        error("Binance: $lastErr")
     }
 
     private fun parseKlines(body: String): List<RawKline> {

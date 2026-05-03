@@ -32,20 +32,41 @@ class BarchartClient(private val client: OkHttpClient, private val cookieJar: Co
     private var primed: Boolean = false
 
     private fun prime(symbol: String) {
-        // Pages differ for stocks vs crypto; either yields the cookies we need.
-        val url = if (symbol.startsWith("^")) {
-            "https://www.barchart.com/crypto/quotes/${symbol}/overview"
-        } else {
-            "https://www.barchart.com/stocks/quotes/${symbol}/price-history/historical"
+        // Use the lightest dynamic page that still goes through Laravel
+        // and sets XSRF-TOKEN.  /login is a small page (~30 KB) and
+        // works for both stocks and crypto symbols.  Falls back to the
+        // symbol-specific page only if /login doesn't yield a token.
+        val candidateUrls = listOf(
+            "https://www.barchart.com/login",
+            if (symbol.startsWith("^"))
+                "https://www.barchart.com/crypto/quotes/${symbol}/overview"
+            else
+                "https://www.barchart.com/stocks/quotes/${symbol}/price-history/historical"
+        )
+        var lastError: Throwable? = null
+        for (url in candidateUrls) {
+            try {
+                val req = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", BROWSER_UA)
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .header("Accept-Language", "en-US,en;q=0.9")
+                    .header("Cache-Control", "no-cache")
+                    .build()
+                client.newCall(req).execute().use { it.body?.close() }
+                // Did we actually get the cookie?
+                val host = HttpUrl.Builder().scheme("https").host("www.barchart.com").build()
+                val hasToken = cookieJar.loadForRequest(host).any { it.name == "XSRF-TOKEN" }
+                if (hasToken) {
+                    primed = true
+                    return
+                }
+            } catch (t: Throwable) {
+                lastError = t
+            }
         }
-        val req = Request.Builder()
-            .url(url)
-            .header("User-Agent", BROWSER_UA)
-            .header("Accept", "text/html,application/xhtml+xml")
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .build()
-        client.newCall(req).execute().use { it.body?.close() }
-        primed = true
+        if (lastError != null) throw lastError
+        error("Barchart prime failed: ไม่ได้รับ XSRF-TOKEN")
     }
 
     private fun xsrfToken(): String {
