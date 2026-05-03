@@ -47,6 +47,7 @@ class PriceRepository {
         .build()
 
     private val barchart = BarchartClient(client, cookieJar)
+    private val binance = BinanceClient(client)
     private val coinGecko = CoinGeckoClient(client)
 
     suspend fun load(periodDays: Int = 365): CompareSeries = coroutineScope {
@@ -54,16 +55,22 @@ class PriceRepository {
             barchart.fetchEod("MSTR", periodDays + 30)
         }
         val btcHourlyJob = async(Dispatchers.IO) {
-            // CoinGecko: hourly granularity is reliable up to ~90 days.
-            // Always fetch hourly so the imbalance engine has NYSE-aligned points.
-            coinGecko.fetchBtcHourly(periodDays.coerceAtMost(90))
+            // Primary: Binance public klines (no rate-limit, full OHLC).
+            // Fallback: CoinGecko hourly close-only.  Last-resort: empty.
+            try {
+                binance.fetchBtcHourly(periodDays.coerceAtMost(80))
+            } catch (t: Throwable) {
+                runCatching {
+                    coinGecko.fetchBtcHourly(periodDays.coerceAtMost(90))
+                }.getOrDefault(emptyList())
+            }
         }
         val btcDailyJob = async(Dispatchers.IO) {
-            // For chart ranges longer than 90 days we pad with daily bars
-            // so the visual stays full-length even though the imbalance
-            // signal is computed only over the hourly window.
-            if (periodDays > 90) {
-                runCatching { coinGecko.fetchBtcDaily(periodDays + 30) }.getOrDefault(emptyList())
+            // For longer ranges, extend the chart line backwards with daily
+            // bars from Binance.
+            if (periodDays > 80) {
+                runCatching { binance.fetchBtcDaily(periodDays + 30) }
+                    .getOrDefault(emptyList())
             } else emptyList()
         }
 

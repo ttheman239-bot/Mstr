@@ -266,7 +266,7 @@ private fun ReadyView(state: UiState.Ready) {
 
         Spacer(Modifier.height(8.dp))
         Text(
-            "ข้อมูล: MSTR จาก Barchart (1d) • BTC จาก CoinGecko (hourly, 90d)",
+            "ข้อมูล: MSTR จาก Barchart (1d) • BTC จาก Binance klines (1h, NY-aligned)",
             color = Muted, fontSize = 11.sp
         )
     }
@@ -462,7 +462,7 @@ private fun EmptyImbalanceNote() {
         Text("ยังไม่มีสัญญาณ", color = Color.White,
             fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         Text(
-            "ข้อมูล BTC hourly จาก CoinGecko น้อยเกินไป (rate-limit หรือ network) → " +
+            "ข้อมูล BTC hourly ไม่พอ (Binance ไม่ตอบ หรือ network) → " +
                 "เครื่องคำนวณ imbalance ทำงานไม่ได้",
             color = Muted, fontSize = 11.sp
         )
