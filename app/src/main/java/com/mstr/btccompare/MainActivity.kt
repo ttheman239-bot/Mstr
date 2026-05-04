@@ -61,7 +61,7 @@ import com.mstr.btccompare.data.Verdict
 import com.mstr.btccompare.ui.ChartSeries
 import com.mstr.btccompare.ui.MainViewModel
 import com.mstr.btccompare.ui.UiState
-import com.mstr.btccompare.ui.MpLineChart
+import com.mstr.btccompare.ui.ZoomLineChart
 
 private val Bg = Color(0xFF0B0F19)
 private val Card = Color(0xFF111827)
@@ -289,13 +289,10 @@ private fun ReadyView(state: UiState.Ready) {
             colorAccent = BtcOrange,
             heightDp = 300
         ) {
-            MpLineChart(
+            ZoomLineChart(
                 series = btcSeries + mstrSeries,
-                bgColor = Card,
-                gridColor = Grid,
-                axisColor = Muted,
-                yLeftFormatter = { v -> formatPrice(v.toDouble()) },
-                yRightFormatter = { v -> formatPrice(v.toDouble()) },
+                gridColor = Grid, axisColor = Muted,
+                tooltipBg = TooltipBg, tooltipText = Color.White,
                 modifier = Modifier.fillMaxSize()
             )
         }
