@@ -1,6 +1,5 @@
 package com.mstr.btccompare.ui
 
-import android.graphics.DashPathEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -8,7 +7,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
 import com.github.mikephil.charting.charts.LineChart
-import com.github.mikephil.charting.components.Description
 import com.github.mikephil.charting.components.Legend
 import com.github.mikephil.charting.components.XAxis
 import com.github.mikephil.charting.components.YAxis
@@ -17,7 +15,6 @@ import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
 import com.github.mikephil.charting.formatter.ValueFormatter
 import com.github.mikephil.charting.interfaces.datasets.ILineDataSet
-import com.mstr.btccompare.data.PricePoint
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -41,16 +38,21 @@ fun MpLineChart(
     yRightFormatter: (Float) -> String = ::defaultYFormat
 ) {
     val datePattern = remember { SimpleDateFormat("MMM d", Locale.US) }
+    // Capture as Int up-front to avoid name collisions inside .apply
+    // blocks (XAxis.gridColor : Int collides with outer gridColor : Color).
+    val bgArgb = bgColor.toArgb()
+    val gridArgb = gridColor.toArgb()
+    val axisArgb = axisColor.toArgb()
 
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
             LineChart(ctx).apply {
-                description = Description().apply { isEnabled = false }
-                setBackgroundColor(bgColor.toArgb())
+                description.isEnabled = false
+                setBackgroundColor(bgArgb)
                 setDrawGridBackground(false)
                 setNoDataText("กำลังโหลด...")
-                setNoDataTextColor(axisColor.toArgb())
+                setNoDataTextColor(axisArgb)
 
                 setTouchEnabled(true)
                 isDragEnabled = true
@@ -62,8 +64,8 @@ fun MpLineChart(
 
                 xAxis.apply {
                     position = XAxis.XAxisPosition.BOTTOM
-                    textColor = axisColor.toArgb()
-                    gridColor = gridColor.toArgb()
+                    textColor = axisArgb
+                    gridColor = gridArgb
                     setDrawAxisLine(false)
                     setLabelCount(5, false)
                     valueFormatter = object : ValueFormatter() {
@@ -73,8 +75,8 @@ fun MpLineChart(
                 }
 
                 axisLeft.apply {
-                    textColor = axisColor.toArgb()
-                    gridColor = gridColor.toArgb()
+                    textColor = axisArgb
+                    gridColor = gridArgb
                     setDrawAxisLine(false)
                     valueFormatter = object : ValueFormatter() {
                         override fun getFormattedValue(value: Float) = yLeftFormatter(value)
@@ -83,7 +85,7 @@ fun MpLineChart(
 
                 axisRight.apply {
                     isEnabled = true
-                    textColor = axisColor.toArgb()
+                    textColor = axisArgb
                     setDrawGridLines(false)
                     setDrawAxisLine(false)
                     valueFormatter = object : ValueFormatter() {
@@ -93,7 +95,7 @@ fun MpLineChart(
 
                 legend.apply {
                     isEnabled = showLegend
-                    textColor = axisColor.toArgb()
+                    textColor = axisArgb
                     form = Legend.LegendForm.LINE
                     horizontalAlignment = Legend.LegendHorizontalAlignment.CENTER
                     verticalAlignment = Legend.LegendVerticalAlignment.TOP
@@ -127,7 +129,7 @@ fun MpLineChart(
                     } else {
                         YAxis.AxisDependency.LEFT
                     }
-                    highLightColor = axisColor.toArgb()
+                    highLightColor = axisArgb
                     highlightLineWidth = 1.2f
                     setDrawHighlightIndicators(true)
                     enableDashedHighlightLine(8f, 4f, 0f)
