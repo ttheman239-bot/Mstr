@@ -64,7 +64,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // Chart library — battle-tested, native zoom/pan/highlight
-    implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
+    // Using AppDevNext's AndroidX-migrated fork (PhilJay's 3.1.0 still
+    // ships pre-AndroidX support-lib references that fail with Jetifier off).
+    implementation("com.github.AppDevNext:AndroidChart:3.1.0.27")
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
 
