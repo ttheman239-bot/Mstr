@@ -63,6 +63,9 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // Chart library — battle-tested, native zoom/pan/highlight
+    implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
+
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling")

@@ -61,7 +61,7 @@ import com.mstr.btccompare.data.Verdict
 import com.mstr.btccompare.ui.ChartSeries
 import com.mstr.btccompare.ui.MainViewModel
 import com.mstr.btccompare.ui.UiState
-import com.mstr.btccompare.ui.ZoomLineChart
+import com.mstr.btccompare.ui.MpLineChart
 
 private val Bg = Color(0xFF0B0F19)
 private val Card = Color(0xFF111827)
@@ -289,10 +289,13 @@ private fun ReadyView(state: UiState.Ready) {
             colorAccent = BtcOrange,
             heightDp = 300
         ) {
-            ZoomLineChart(
+            MpLineChart(
                 series = btcSeries + mstrSeries,
-                gridColor = Grid, axisColor = Muted,
-                tooltipBg = TooltipBg, tooltipText = Color.White,
+                bgColor = Card,
+                gridColor = Grid,
+                axisColor = Muted,
+                yLeftFormatter = { v -> formatPrice(v.toDouble()) },
+                yRightFormatter = { v -> formatPrice(v.toDouble()) },
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -626,6 +629,16 @@ private fun BtcSourcesCard(
 
 private fun formatBtc(v: Double?): String =
     if (v == null) "—" else "$%,.0f".format(v)
+
+private fun formatPrice(v: Double): String {
+    val a = kotlin.math.abs(v)
+    return when {
+        a >= 1_000_000 -> "$%.2fM".format(v / 1_000_000)
+        a >= 1_000 -> "$%.1fk".format(v / 1_000)
+        a >= 10 -> "$%.0f".format(v)
+        else -> "$%.2f".format(v)
+    }
+}
 
 private fun pctChange(points: List<PricePoint>): Double {
     if (points.size < 2) return 0.0
