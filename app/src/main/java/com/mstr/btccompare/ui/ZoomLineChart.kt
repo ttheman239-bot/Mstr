@@ -112,6 +112,17 @@ fun ZoomLineChart(
             val tsMax = all.maxOf { it.timestampSec }
             val tsSpan = (tsMax - tsMin).coerceAtLeast(1L)
 
+            // ── Group y-scales by axis (left = !rightAxis, right = rightAxis)
+            // so e.g. BTC@open and BTC@close share one scale and visually align.
+            val leftPoints = series.filter { !it.rightAxis }.flatMap { it.points }
+            val rightPoints = series.filter { it.rightAxis }.flatMap { it.points }
+            val leftMin = leftPoints.minOfOrNull { it.value } ?: 0.0
+            val leftMax = leftPoints.maxOfOrNull { it.value } ?: 1.0
+            val leftSpan = (leftMax - leftMin).takeIf { it > 0.0 } ?: 1.0
+            val rightMin = rightPoints.minOfOrNull { it.value } ?: 0.0
+            val rightMax = rightPoints.maxOfOrNull { it.value } ?: 1.0
+            val rightSpan = (rightMax - rightMin).takeIf { it > 0.0 } ?: 1.0
+
             // Grid (horizontal lines)
             val dashed = PathEffect.dashPathEffect(floatArrayOf(6f, 8f))
             val gridLines = 4
@@ -138,12 +149,11 @@ fun ZoomLineChart(
                 return fracToScreen(f)
             }
 
-            // Draw each series clipped to plot
+            // Draw each series clipped to plot — shares min/max with its axis group
             series.forEach { s ->
                 if (s.points.size < 2) return@forEach
-                val mn = s.points.minOf { it.value }
-                val mx = s.points.maxOf { it.value }
-                val span = (mx - mn).takeIf { it > 0.0 } ?: 1.0
+                val mn = if (s.rightAxis) rightMin else leftMin
+                val span = if (s.rightAxis) rightSpan else leftSpan
 
                 fun yFor(v: Double): Float {
                     val frac = (v - mn) / span
@@ -194,12 +204,11 @@ fun ZoomLineChart(
                 drawPath(path = path, color = s.color, style = stroke)
             }
 
-            // Buy/sell markers drawn relative to the chosen series' min/max
+            // Buy/sell markers drawn on the same scale as their host series.
             val markerHost = series.getOrNull(markerSeriesIndex)
             if (markers.isNotEmpty() && markerHost != null && markerHost.points.size >= 2) {
-                val mn = markerHost.points.minOf { it.value }
-                val mx = markerHost.points.maxOf { it.value }
-                val span = (mx - mn).takeIf { it > 0.0 } ?: 1.0
+                val mn = if (markerHost.rightAxis) rightMin else leftMin
+                val span = if (markerHost.rightAxis) rightSpan else leftSpan
                 markers.forEach { m ->
                     val x = tsToScreen(m.timestampSec)
                     if (x !in (padL - 8f)..(padL + plotW + 8f)) return@forEach
@@ -232,36 +241,33 @@ fun ZoomLineChart(
                 }
             }
 
-            // Y-axis labels: leftmost series → left, first rightAxis series → right
+            // Y-axis labels — labels match the **group** min/max so multiple
+            // lines on the same axis share one consistent scale.
             val leftSeries = series.firstOrNull { !it.rightAxis }
             val rightSeries = series.firstOrNull { it.rightAxis }
-
-            if (leftSeries != null && leftSeries.points.size >= 2) {
-                val mn = leftSeries.points.minOf { it.value }
-                val mx = leftSeries.points.maxOf { it.value }
+            if (leftSeries != null && leftPoints.size >= 2) {
                 val paint = textPaint(leftSeries.color, labelPx)
                 drawContext.canvas.nativeCanvas.drawText(
-                    valueFormatter(mx), 4f, padT + 10f, paint
+                    valueFormatter(leftMax), 4f, padT + 10f, paint
                 )
                 drawContext.canvas.nativeCanvas.drawText(
-                    valueFormatter(mn), 4f, padT + plotH, paint
+                    valueFormatter(leftMin), 4f, padT + plotH, paint
                 )
                 drawContext.canvas.nativeCanvas.drawText(
-                    valueFormatter((mx + mn) / 2.0), 4f, padT + plotH / 2f, paint
+                    valueFormatter((leftMax + leftMin) / 2.0), 4f, padT + plotH / 2f, paint
                 )
             }
-            if (rightSeries != null && rightSeries.points.size >= 2) {
-                val mn = rightSeries.points.minOf { it.value }
-                val mx = rightSeries.points.maxOf { it.value }
+            if (rightSeries != null && rightPoints.size >= 2) {
                 val paint = textPaint(rightSeries.color, labelPx)
                 drawContext.canvas.nativeCanvas.drawText(
-                    valueFormatter(mx), padL + plotW + 4f, padT + 10f, paint
+                    valueFormatter(rightMax), padL + plotW + 4f, padT + 10f, paint
                 )
                 drawContext.canvas.nativeCanvas.drawText(
-                    valueFormatter(mn), padL + plotW + 4f, padT + plotH, paint
+                    valueFormatter(rightMin), padL + plotW + 4f, padT + plotH, paint
                 )
                 drawContext.canvas.nativeCanvas.drawText(
-                    valueFormatter((mx + mn) / 2.0), padL + plotW + 4f, padT + plotH / 2f, paint
+                    valueFormatter((rightMax + rightMin) / 2.0),
+                    padL + plotW + 4f, padT + plotH / 2f, paint
                 )
             }
 
@@ -311,9 +317,10 @@ fun ZoomLineChart(
                     val nearest = s.points.minBy { abs(it.timestampSec - targetTs) }
                     rows.add(Triple(s.label, nearest.value, s.color))
                     val nx = tsToScreen(nearest.timestampSec)
-                    val mn = s.points.minOf { it.value }
-                    val mx = s.points.maxOf { it.value }
-                    val span2 = (mx - mn).takeIf { it > 0.0 } ?: 1.0
+                    // Use the *group* scale so the dot lands exactly on the
+                    // line we drew above.
+                    val mn = if (s.rightAxis) rightMin else leftMin
+                    val span2 = if (s.rightAxis) rightSpan else leftSpan
                     val ny = padT + plotH * (1f - ((nearest.value - mn) / span2).toFloat())
                     drawCircle(
                         color = s.color,
