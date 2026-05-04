@@ -139,9 +139,12 @@ object ImbalanceEngine {
             val sorted = barsToday.sortedBy { it.localDateTime }
             val nineThirty = nearestBar(sorted, LocalTime.of(9, 30))
             val sixteen = nearestBar(sorted, LocalTime.of(16, 0))
+            // For the bar starting at the target hour, bar.open is the
+            // price AT that hour boundary.  Using bar.close here would
+            // give the price 1h LATER than the target — wrong.
             btcSnapshots[date] = BtcSnapshot(
                 atUsOpen = nineThirty?.open,
-                atUsClose = sixteen?.close
+                atUsClose = sixteen?.open
             )
         }
 

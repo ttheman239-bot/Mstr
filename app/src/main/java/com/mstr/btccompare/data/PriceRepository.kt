@@ -32,6 +32,12 @@ data class CompareSeries(
     val latestMstr: Double,
     val periodDays: Int,
 
+    // Cross-check: latest BTC spot from each independent source
+    val btcLatestBinance: Double?,
+    val btcLatestCoinbase: Double?,
+    val btcLatestCoinGecko: Double?,
+    val btcSourceUsed: String,
+
     // Imbalance signal output (null if engine couldn't run)
     val imbalance: ImbalanceReport?
 )
@@ -52,6 +58,7 @@ class PriceRepository {
     private val barchart = BarchartClient(client, cookieJar)
     private val binance = BinanceClient(client)
     private val coinGecko = CoinGeckoClient(client)
+    private val coinbase = CoinbaseClient(client)
 
     suspend fun load(periodDays: Int = 365): CompareSeries = coroutineScope {
         val mstrJob = async(Dispatchers.IO) {
@@ -72,15 +79,23 @@ class PriceRepository {
             }
         }
         val btcHourlyJob = async(Dispatchers.IO) {
-            // Primary: Binance public klines (no rate-limit, full OHLC).
-            // Fallback: CoinGecko hourly close-only.  Last-resort: empty.
-            try {
-                binance.fetchBtcHourly(periodDays.coerceAtMost(80))
-            } catch (binErr: Throwable) {
-                runCatching {
-                    coinGecko.fetchBtcHourly(periodDays.coerceAtMost(90))
-                }.getOrDefault(emptyList())
+            // BTC hourly: try three independent sources in order
+            //   1. Binance public klines     (full OHLC, ~80d coverage)
+            //   2. Coinbase exchange candles (full OHLC, ~12d coverage)
+            //   3. CoinGecko market_chart    (close only, ~90d coverage)
+            // First successful source wins; the result is tagged so the
+            // user can see which source supplied the historical data.
+            val attempts = listOf<Pair<String, () -> List<MinuteBar>>>(
+                "Binance" to { binance.fetchBtcHourly(periodDays.coerceAtMost(80)) },
+                "Coinbase" to { coinbase.fetchBtcHourly(periodDays.coerceAtMost(12) * 24) },
+                "CoinGecko" to { coinGecko.fetchBtcHourly(periodDays.coerceAtMost(90)) }
+            )
+            var picked: Pair<String, List<MinuteBar>>? = null
+            for ((name, fetch) in attempts) {
+                val res = runCatching { fetch() }.getOrDefault(emptyList())
+                if (res.size >= 24) { picked = name to res; break }
             }
+            picked ?: ("none" to emptyList())
         }
         val btcDailyJob = async(Dispatchers.IO) {
             if (periodDays > 80) {
@@ -88,46 +103,56 @@ class PriceRepository {
                     .getOrDefault(emptyList())
             } else emptyList()
         }
+        // Latest spot from each source — for cross-check display only.
+        val spotBinanceJob = async(Dispatchers.IO) {
+            runCatching { binance.fetchBtcHourly(2).lastOrNull()?.close }.getOrNull()
+        }
+        val spotCoinbaseJob = async(Dispatchers.IO) {
+            runCatching { coinbase.fetchSpot() }.getOrNull()
+        }
+        val spotCoinGeckoJob = async(Dispatchers.IO) {
+            runCatching {
+                coinGecko.fetchBtcHourly(2).lastOrNull()?.close
+            }.getOrNull()
+        }
 
         val mstrDays = mstrJob.await()
-        val btcHourly = btcHourlyJob.await()
+        val (btcSourceUsed, btcHourly) = btcHourlyJob.await()
         val btcDailyExtra = btcDailyJob.await()
+        val spotBinance = spotBinanceJob.await()
+        val spotCoinbase = spotCoinbaseJob.await()
+        val spotCoinGecko = spotCoinGeckoJob.await()
 
         // ── Build per-NYSE-date BTC@9:30 / @16:00 from hourly bars when we
         //    have them; for older dates fall back to daily open / close.
         val btcByDate = LinkedHashMap<LocalDate, BtcDayPoint>()
 
         // (a) hourly-derived snapshots
-        // Tolerance: only accept a bar within ±90 min of the target time.
-        // Otherwise the day's data is genuinely missing and we leave it null
-        // (rather than silently substituting a far-away bar).
+        // For each NYSE date pick the bar whose **open time** is closest to
+        // the target NY-time.  Then use bar.open (not bar.close) — for an
+        // hourly bar starting at 16:00 ET, bar.open = price at 16:00 ET
+        // (the actual NYSE close price); bar.close = price at 17:00 ET,
+        // an hour AFTER the close, which would be wrong.
+        // Tolerance: only accept a bar within ±90 min of the target.
         val tolMin = 90L
         val targetOpenMin = (9 * 60 + 30).toLong()
         val targetCloseMin = (16 * 60).toLong()
         btcHourly.groupBy { it.localDateTime.toLocalDate() }
             .forEach { (date, bars) ->
                 val sorted = bars.sortedBy { it.localDateTime }
-                val nearOpen = sorted.minByOrNull {
-                    val mins = it.localDateTime.toLocalTime().toSecondOfDay() / 60L
-                    kotlin.math.abs(mins - targetOpenMin)
-                }
-                val nearClose = sorted.minByOrNull {
-                    val mins = it.localDateTime.toLocalTime().toSecondOfDay() / 60L
-                    kotlin.math.abs(mins - targetCloseMin)
-                }
-                fun within(bar: MinuteBar?, target: Long): Double? {
-                    if (bar == null) return null
+
+                fun pickAt(target: Long): Double? {
+                    val bar = sorted.minByOrNull {
+                        val mins = it.localDateTime.toLocalTime().toSecondOfDay() / 60L
+                        kotlin.math.abs(mins - target)
+                    } ?: return null
                     val mins = bar.localDateTime.toLocalTime().toSecondOfDay() / 60L
-                    return if (kotlin.math.abs(mins - target) <= tolMin) bar.open else null
-                }
-                fun closeWithin(bar: MinuteBar?, target: Long): Double? {
-                    if (bar == null) return null
-                    val mins = bar.localDateTime.toLocalTime().toSecondOfDay() / 60L
-                    return if (kotlin.math.abs(mins - target) <= tolMin) bar.close else null
+                    if (kotlin.math.abs(mins - target) > tolMin) return null
+                    return bar.open    // open = price AT openTime
                 }
                 btcByDate[date] = BtcDayPoint(
-                    atUsOpen = within(nearOpen, targetOpenMin),
-                    atUsClose = closeWithin(nearClose, targetCloseMin)
+                    atUsOpen = pickAt(targetOpenMin),
+                    atUsClose = pickAt(targetCloseMin)
                 )
             }
 
@@ -140,32 +165,22 @@ class PriceRepository {
             }
         }
 
-        // ── Cross-align with MSTR trading days
         val mstrByDate = mstrDays.associateBy { it.date }
-        val tradingDates = (btcByDate.keys intersect mstrByDate.keys).sorted()
 
+        // ── BTC line series — every date where we got a BTC reading,
+        //    irrespective of whether MSTR has data for that date too.
         val btcAtUsClose = ArrayList<PricePoint>()
         val btcAtUsOpen = ArrayList<PricePoint>()
-        val ratio = ArrayList<PricePoint>()
-        for (date in tradingDates) {
-            val b = btcByDate[date] ?: continue
+        for ((date, b) in btcByDate.toSortedMap()) {
             val tsClose = date.atTime(16, 0).atZone(nyZone).toEpochSecond()
             val tsOpen = date.atTime(9, 30).atZone(nyZone).toEpochSecond()
             b.atUsClose?.let { btcAtUsClose.add(PricePoint(tsClose, it)) }
             b.atUsOpen?.let { btcAtUsOpen.add(PricePoint(tsOpen, it)) }
-            val mstrClose = mstrByDate[date]?.close ?: 0.0
-            if (mstrClose > 0.0 && b.atUsClose != null) {
-                ratio.add(PricePoint(tsClose, b.atUsClose / mstrClose))
-            }
         }
 
-        val btcOpenByDay = btcAtUsOpen.associateBy { dayKey(it.timestampSec) }
-        val btcOpenMinusClose = btcAtUsClose.mapNotNull { c ->
-            val o = btcOpenByDay[dayKey(c.timestampSec)]?.value ?: return@mapNotNull null
-            PricePoint(c.timestampSec, c.value - o)
-        }
-
-        val mstrAligned = mstrDays.filter { tradingDates.contains(it.date) }
+        // ── MSTR line series — show **every** MSTR trading day,
+        //    not just dates where BTC also has aligned data.
+        val mstrAligned = mstrDays
         val mstrClose = mstrAligned.map {
             PricePoint(it.date.atTime(16, 0).atZone(nyZone).toEpochSecond(), it.close)
         }
@@ -177,6 +192,23 @@ class PriceRepository {
                 it.date.atTime(16, 0).atZone(nyZone).toEpochSecond(),
                 it.open - it.close
             )
+        }
+
+        // ── BTC open-minus-close (per-day diff) — only days where both
+        //    open and close BTC readings exist.
+        val btcOpenByDay = btcAtUsOpen.associateBy { dayKey(it.timestampSec) }
+        val btcOpenMinusClose = btcAtUsClose.mapNotNull { c ->
+            val o = btcOpenByDay[dayKey(c.timestampSec)]?.value ?: return@mapNotNull null
+            PricePoint(c.timestampSec, c.value - o)
+        }
+
+        // ── Ratio (BTC@US-close / MSTR-close) — only days where both exist.
+        val mstrCloseByDay = mstrAligned.associateBy { it.date }
+        val ratio = btcAtUsClose.mapNotNull { c ->
+            val date = dayKey(c.timestampSec)
+            val mstrCloseValue = mstrCloseByDay[date]?.close ?: return@mapNotNull null
+            if (mstrCloseValue <= 0.0) return@mapNotNull null
+            PricePoint(c.timestampSec, c.value / mstrCloseValue)
         }
 
         // ── Hourly BTC line for short-period charts (every bar's close)
@@ -204,6 +236,10 @@ class PriceRepository {
             latestBtcUsOpen = btcAtUsOpen.lastOrNull()?.value ?: 0.0,
             latestMstr = mstrClose.lastOrNull()?.value ?: 0.0,
             periodDays = periodDays,
+            btcLatestBinance = spotBinance,
+            btcLatestCoinbase = spotCoinbase,
+            btcLatestCoinGecko = spotCoinGecko,
+            btcSourceUsed = btcSourceUsed,
             imbalance = imbalance
         )
     }

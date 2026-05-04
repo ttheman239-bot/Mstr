@@ -219,6 +219,14 @@ private fun ReadyView(state: UiState.Ready) {
             EmptyImbalanceNote()
         }
 
+        Spacer(Modifier.height(12.dp))
+        BtcSourcesCard(
+            binance = data.btcLatestBinance,
+            coinbase = data.btcLatestCoinbase,
+            coinGecko = data.btcLatestCoinGecko,
+            sourceUsed = data.btcSourceUsed
+        )
+
         Spacer(Modifier.height(16.dp))
 
         SummaryRow(
@@ -581,6 +589,43 @@ private fun ChartCard(
         }
     }
 }
+
+@Composable
+private fun BtcSourcesCard(
+    binance: Double?,
+    coinbase: Double?,
+    coinGecko: Double?,
+    sourceUsed: String
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Card)
+            .padding(14.dp)
+    ) {
+        Text("BTC cross-check (latest spot)", color = Color.White,
+            fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        Text(
+            "ใช้ $sourceUsed สำหรับข้อมูลย้อนหลัง • ตัวเลข 3 แหล่งควรใกล้กัน (~0.1%)",
+            color = Muted, fontSize = 11.sp
+        )
+        Spacer(Modifier.height(8.dp))
+        StatRow("Binance", formatBtc(binance))
+        StatRow("Coinbase", formatBtc(coinbase))
+        StatRow("CoinGecko", formatBtc(coinGecko))
+        val all = listOfNotNull(binance, coinbase, coinGecko)
+        if (all.size >= 2) {
+            val mn = all.min(); val mx = all.max()
+            val spreadPct = if (mn > 0) (mx - mn) / mn * 100.0 else 0.0
+            Spacer(Modifier.height(4.dp))
+            StatRow("Spread", "%.3f%% (\$%.0f)".format(spreadPct, mx - mn))
+        }
+    }
+}
+
+private fun formatBtc(v: Double?): String =
+    if (v == null) "—" else "$%,.0f".format(v)
 
 private fun pctChange(points: List<PricePoint>): Double {
     if (points.size < 2) return 0.0
