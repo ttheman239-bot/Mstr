@@ -20,6 +20,7 @@ data class CompareSeries(
     val btcAtUsClose: List<PricePoint>,
     val btcAtUsOpen: List<PricePoint>,
     val btcOpenMinusClose: List<PricePoint>,
+    val btcHourlyLine: List<PricePoint>,    // every hourly close — for short-period charts
     val mstrClose: List<PricePoint>,
     val mstrOpen: List<PricePoint>,
     val mstrOpenMinusClose: List<PricePoint>,
@@ -97,20 +98,36 @@ class PriceRepository {
         val btcByDate = LinkedHashMap<LocalDate, BtcDayPoint>()
 
         // (a) hourly-derived snapshots
+        // Tolerance: only accept a bar within ±90 min of the target time.
+        // Otherwise the day's data is genuinely missing and we leave it null
+        // (rather than silently substituting a far-away bar).
+        val tolMin = 90L
+        val targetOpenMin = (9 * 60 + 30).toLong()
+        val targetCloseMin = (16 * 60).toLong()
         btcHourly.groupBy { it.localDateTime.toLocalDate() }
             .forEach { (date, bars) ->
                 val sorted = bars.sortedBy { it.localDateTime }
                 val nearOpen = sorted.minByOrNull {
-                    val mins = it.localDateTime.toLocalTime().toSecondOfDay() / 60
-                    kotlin.math.abs(mins - (9 * 60 + 30))
+                    val mins = it.localDateTime.toLocalTime().toSecondOfDay() / 60L
+                    kotlin.math.abs(mins - targetOpenMin)
                 }
                 val nearClose = sorted.minByOrNull {
-                    val mins = it.localDateTime.toLocalTime().toSecondOfDay() / 60
-                    kotlin.math.abs(mins - 16 * 60)
+                    val mins = it.localDateTime.toLocalTime().toSecondOfDay() / 60L
+                    kotlin.math.abs(mins - targetCloseMin)
+                }
+                fun within(bar: MinuteBar?, target: Long): Double? {
+                    if (bar == null) return null
+                    val mins = bar.localDateTime.toLocalTime().toSecondOfDay() / 60L
+                    return if (kotlin.math.abs(mins - target) <= tolMin) bar.open else null
+                }
+                fun closeWithin(bar: MinuteBar?, target: Long): Double? {
+                    if (bar == null) return null
+                    val mins = bar.localDateTime.toLocalTime().toSecondOfDay() / 60L
+                    return if (kotlin.math.abs(mins - target) <= tolMin) bar.close else null
                 }
                 btcByDate[date] = BtcDayPoint(
-                    atUsOpen = nearOpen?.open,
-                    atUsClose = nearClose?.close
+                    atUsOpen = within(nearOpen, targetOpenMin),
+                    atUsClose = closeWithin(nearClose, targetCloseMin)
                 )
             }
 
@@ -162,6 +179,12 @@ class PriceRepository {
             )
         }
 
+        // ── Hourly BTC line for short-period charts (every bar's close)
+        val btcHourlyLine = btcHourly.map {
+            val ts = it.localDateTime.atZone(nyZone).toEpochSecond()
+            PricePoint(ts, it.close)
+        }
+
         // ── Run imbalance engine.  Needs hourly BTC + daily MSTR.
         val nowEt = ZonedDateTime.ofInstant(Instant.now(), nyZone).toLocalDateTime()
         val imbalance = if (btcHourly.size >= 50) {
@@ -172,6 +195,7 @@ class PriceRepository {
             btcAtUsClose = btcAtUsClose,
             btcAtUsOpen = btcAtUsOpen,
             btcOpenMinusClose = btcOpenMinusClose,
+            btcHourlyLine = btcHourlyLine,
             mstrClose = mstrClose,
             mstrOpen = mstrOpen,
             mstrOpenMinusClose = mstrOpenMinusClose,

@@ -8,6 +8,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -136,19 +138,20 @@ fun AppScreen(vm: MainViewModel = viewModel()) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PeriodSelector(current: Int, onPick: (Int) -> Unit) {
     val labels = mapOf(
-        30 to "1M",
-        90 to "3M",
-        180 to "6M",
-        365 to "1Y",
-        720 to "2Y"
+        1 to "1d", 2 to "2d", 3 to "3d", 4 to "4d",
+        5 to "5d", 6 to "6d", 7 to "7d",
+        30 to "1M", 90 to "3M", 180 to "6M",
+        365 to "1Y", 720 to "2Y"
     )
-    val options = listOf(30, 90, 180, 365, 720)
-    Row(
+    val options = listOf(1, 2, 3, 4, 5, 6, 7, 30, 90, 180, 365, 720)
+    FlowRow(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         options.forEach { d ->
             val selected = d == current
@@ -159,7 +162,8 @@ private fun PeriodSelector(current: Int, onPick: (Int) -> Unit) {
                     containerColor = if (selected) BtcOrange else Card,
                     contentColor = if (selected) Color.Black else Color.White
                 ),
-                modifier = Modifier.height(36.dp)
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                modifier = Modifier.height(34.dp)
             ) {
                 Text(labels[d] ?: "${d}D", fontSize = 12.sp)
             }
@@ -227,32 +231,53 @@ private fun ReadyView(state: UiState.Ready) {
         DiffToggle(diffMode) { diffMode = it }
         Spacer(Modifier.height(8.dp))
 
-        val btcSeries = if (diffMode) {
-            listOf(
+        val isShortPeriod = data.periodDays <= 7
+        val btcSeries = when {
+            diffMode -> listOf(
                 ChartSeries(
                     label = "BTC US-close − US-open",
                     color = BtcOrange,
                     points = data.btcOpenMinusClose
                 )
             )
-        } else {
-            listOf(
+            isShortPeriod -> {
+                // Show every hourly close for fine intraday detail.
+                val cutoff = System.currentTimeMillis() / 1000L -
+                    data.periodDays.toLong() * 24L * 3600L
+                val recent = data.btcHourlyLine.filter { it.timestampSec >= cutoff }
+                listOf(ChartSeries("BTC hourly", BtcOrange, recent))
+            }
+            else -> listOf(
                 ChartSeries("BTC @ US 16:00", BtcOrange, data.btcAtUsClose),
                 ChartSeries("BTC @ US 9:30", BtcAmber, data.btcAtUsOpen, dashed = true)
             )
         }
-        val mstrSeries = if (diffMode) {
-            ChartSeries("MSTR open − close", MstrBlue, data.mstrOpenMinusClose, rightAxis = true)
-        } else {
-            ChartSeries("MSTR close", MstrBlue, data.mstrClose, rightAxis = true)
+        val mstrSeries = when {
+            diffMode ->
+                ChartSeries("MSTR open − close", MstrBlue, data.mstrOpenMinusClose, rightAxis = true)
+            isShortPeriod -> {
+                val cutoff = System.currentTimeMillis() / 1000L -
+                    data.periodDays.toLong() * 24L * 3600L
+                ChartSeries("MSTR close",
+                    MstrBlue,
+                    data.mstrClose.filter { it.timestampSec >= cutoff },
+                    rightAxis = true)
+            }
+            else ->
+                ChartSeries("MSTR close", MstrBlue, data.mstrClose, rightAxis = true)
         }
 
         ChartCard(
-            title = if (diffMode) "BTC vs MSTR (open − close)" else "BTC vs MSTR",
-            subtitle = if (diffMode)
-                "Daily intraday: BTC = US-close − US-open • MSTR = open − close"
-            else
-                "BTC: ราคา ณ NYSE 16:00 ET (เข้ม) / 9:30 ET (ประ) • MSTR: close",
+            title = when {
+                diffMode -> "BTC vs MSTR (open − close)"
+                isShortPeriod -> "BTC hourly vs MSTR daily (${data.periodDays}d)"
+                else -> "BTC vs MSTR"
+            },
+            subtitle = when {
+                diffMode -> "Daily intraday: BTC = US-close − US-open • MSTR = open − close"
+                isShortPeriod -> "BTC ทุกชั่วโมง • MSTR daily close"
+                else -> "BTC: ราคา ณ NYSE 16:00 ET (เข้ม) / 9:30 ET (ประ) • MSTR: close"
+            },
             colorAccent = BtcOrange,
             heightDp = 300
         ) {
